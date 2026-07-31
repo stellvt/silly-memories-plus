@@ -1,0 +1,14 @@
+{
+  "display_name": "Silly Memories Plus",
+  "loading_order": 5000,
+  "requires": [],
+  "optional": ["connection-manager"],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Aster/a/",
+  "version": "0.3.0",
+  "description": "Расширение SillyTavern для иерархического сжатия истории чата.",
+  "auto_update": false,
+  "minimum_client_version": "1.15.0",
+  "generate_interceptor": "sillyMemoriesPlusGenerateInterceptor"
+}

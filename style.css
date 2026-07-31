@@ -1,0 +1,367 @@
+#smp-settings .smp-content,
+#smp-settings .smp-submenu-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#smp-settings .smp-submenu {
+  min-width: 0;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.1);
+  overflow: clip;
+}
+
+#smp-settings .smp-submenu > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+}
+
+#smp-settings .smp-submenu > summary::-webkit-details-marker {
+  display: none;
+}
+
+#smp-settings .smp-submenu > summary::after {
+  content: "\f078";
+  margin-left: auto;
+  font-family: "Font Awesome 6 Free";
+  font-weight: 900;
+  opacity: 0.7;
+  transition: transform var(--animation-duration-2x, 0.2s);
+}
+
+#smp-settings .smp-submenu[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+#smp-settings .smp-submenu[open] > summary {
+  border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+#smp-settings .smp-submenu-content {
+  padding: 10px;
+}
+
+#smp-settings .smp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+#smp-settings .smp-grid > label,
+#smp-settings .smp-prompt-field,
+#smp-settings .smp-inline-editor label,
+#smp-settings .smp-editor-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+#smp-settings .smp-percent-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+#smp-settings .smp-percent-input > span,
+#smp-settings .smp-field-hint,
+#smp-settings .smp-library-head span,
+#smp-settings .smp-block-meta,
+#smp-settings .smp-empty {
+  opacity: 0.72;
+}
+
+#smp-settings .smp-field-hint,
+#smp-settings .smp-library-head span,
+#smp-settings .smp-block-meta,
+#smp-settings .smp-empty {
+  font-size: 0.85em;
+}
+
+#smp-settings .smp-info-note,
+#smp-settings .smp-status,
+#smp-settings .smp-stats,
+#smp-settings .smp-block-actions,
+#smp-settings .smp-rollup-panel {
+  padding: 8px 10px;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+#smp-settings .smp-info-note {
+  border-left: 3px solid #6f83a6;
+  background: rgba(111, 131, 166, 0.1);
+  font-size: 0.9em;
+}
+
+#smp-settings .smp-status[data-kind="success"] {
+  border-color: #55c98b;
+}
+
+#smp-settings .smp-status[data-kind="warning"] {
+  border-color: #d9aa4a;
+}
+
+#smp-settings .smp-status[data-kind="error"] {
+  border-color: var(--SmartThemeAlertColor, #d95c5c);
+}
+
+#smp-settings .smp-actions,
+#smp-settings .smp-block-action-buttons,
+#smp-settings .smp-block-local-actions,
+#smp-settings .smp-editor-actions,
+#smp-settings .smp-rollup-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#smp-settings .smp-actions .menu_button,
+#smp-settings .smp-block-action-buttons .menu_button,
+#smp-settings .smp-block-local-actions .menu_button,
+#smp-settings .smp-editor-actions .menu_button,
+#smp-settings .smp-rollup-panel .menu_button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: auto;
+  height: 30px;
+  min-height: 30px;
+  min-width: max-content;
+  margin: 0;
+  padding: 4px 8px;
+  gap: 6px;
+  line-height: 1;
+  white-space: nowrap;
+  font-size: 0.85em;
+}
+
+#smp-settings .smp-actions .menu_button > i,
+#smp-settings .smp-block-action-buttons .menu_button > i,
+#smp-settings .smp-block-local-actions .menu_button > i,
+#smp-settings .smp-editor-actions .menu_button > i,
+#smp-settings .smp-rollup-panel .menu_button > i {
+  flex: 0 0 1.1em;
+  width: 1.1em;
+  text-align: center;
+}
+
+#smp-settings .smp-library-head,
+#smp-settings .smp-block-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#smp-settings .smp-prompt-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  resize: vertical;
+  white-space: pre-wrap;
+  font-family: var(--monoFontFamily, monospace);
+  font-size: 0.9em;
+}
+
+#smp-settings .smp-rollup-panel {
+  align-items: center;
+  justify-content: space-between;
+}
+
+#smp-settings .smp-rollup-panel > div {
+  display: flex;
+  flex: 1 1 240px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+#smp-settings .smp-rollup-panel > div > span {
+  font-size: 0.85em;
+  opacity: 0.72;
+}
+
+#smp-settings .smp-library {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 560px;
+  min-width: 0;
+  overflow: auto;
+}
+
+#smp-settings .smp-block {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+#smp-settings .smp-block.smp-selected {
+  outline: 2px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #7aa2f7) 75%, transparent);
+  outline-offset: -2px;
+}
+
+#smp-settings .smp-block[data-status="active"] {
+  border-left: 4px solid #55c98b;
+}
+
+#smp-settings .smp-block[data-status="retired"] {
+  border-left: 4px solid #6f83a6;
+}
+
+#smp-settings .smp-block[data-status="stale"] {
+  border-left: 4px solid #d9aa4a;
+}
+
+#smp-settings .smp-block[data-use-raw="true"] {
+  border-left-color: #c084fc;
+}
+
+#smp-settings .smp-block > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+#smp-settings .smp-level,
+#smp-settings .smp-status {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+#smp-settings .smp-rollup-level {
+  appearance: none;
+  margin: 0;
+  border: 1px solid transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  transition: background-color var(--animation-duration, 0.1s), border-color var(--animation-duration, 0.1s), color var(--animation-duration, 0.1s);
+}
+
+#smp-settings .smp-rollup-level:hover:not(:disabled) {
+  border-color: var(--SmartThemeBorderColor);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#smp-settings .smp-rollup-level[aria-pressed="true"] {
+  border-color: var(--SmartThemeQuoteColor, #55c98b);
+  background: rgba(85, 201, 139, 0.22);
+  color: inherit;
+}
+
+#smp-settings .smp-rollup-level:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+#smp-settings .smp-block .smp-status {
+  margin-left: auto;
+  border: 0;
+}
+
+#smp-settings .smp-block-local-actions {
+  align-items: center;
+  padding: 7px 9px;
+  border-top: 1px solid var(--SmartThemeBorderColor);
+  border-bottom: 1px solid var(--SmartThemeBorderColor);
+  background: rgba(0, 0, 0, 0.1);
+}
+
+#smp-settings .smp-block-scroll {
+  max-height: min(52vh, 520px);
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+#smp-settings .smp-block-view[hidden],
+#smp-settings .smp-inline-editor[hidden] {
+  display: none;
+}
+
+#smp-settings .smp-structured {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px;
+}
+
+#smp-settings .smp-structured section {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+#smp-settings .smp-structured p,
+#smp-settings .smp-structured ul {
+  margin: 5px 0 0;
+}
+
+#smp-settings .smp-structured p {
+  white-space: pre-wrap;
+}
+
+#smp-settings .smp-structured ul {
+  padding-left: 18px;
+}
+
+#smp-settings .smp-structured li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+#smp-settings .smp-block-meta {
+  padding: 0 10px 10px;
+  overflow-wrap: anywhere;
+}
+
+#smp-settings .smp-inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+#smp-settings .smp-editor-fields {
+  gap: 9px;
+}
+
+#smp-settings .smp-inline-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  resize: vertical;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  #smp-settings .smp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,0 +1,181 @@
+<div id="smp-settings" class="inline-drawer">
+  <div class="inline-drawer-toggle inline-drawer-header">
+    <b>Silly Memories Plus</b>
+    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down interactable" tabindex="0"></div>
+  </div>
+
+  <div class="inline-drawer-content">
+    <div class="smp-content">
+      <details class="smp-submenu" data-section="compaction">
+        <summary><i class="fa-solid fa-compress"></i><span>Compaction policy</span></summary>
+        <div class="smp-submenu-content">
+          <label class="checkbox_label">
+            <input id="smp-enabled" type="checkbox">
+            <span>Enable automatic compaction</span>
+          </label>
+
+          <div class="smp-grid">
+            <label>
+              <span>Compaction trigger</span>
+              <div class="smp-percent-input">
+                <input id="smp-trigger" class="text_pole" type="number" min="50" max="95" step="1" inputmode="numeric">
+                <span aria-hidden="true">%</span>
+              </div>
+            </label>
+            <label>
+              <span>Raw tail</span>
+              <div class="smp-percent-input">
+                <input id="smp-tail" class="text_pole" type="number" min="5" max="50" step="1" inputmode="numeric">
+                <span aria-hidden="true">%</span>
+              </div>
+            </label>
+            <label>
+              <span>Target block tokens</span>
+              <input id="smp-block-target" class="text_pole" type="number" min="256" max="16384" step="128">
+            </label>
+            <label>
+              <span>Minimum source tokens</span>
+              <input id="smp-min-source" class="text_pole" type="number" min="512" max="65536" step="512">
+            </label>
+          </div>
+        </div>
+      </details>
+
+      <details class="smp-submenu" data-section="summarizer">
+        <summary><i class="fa-solid fa-wand-magic-sparkles"></i><span>Summarizer</span></summary>
+        <div class="smp-submenu-content">
+          <div class="smp-grid">
+            <label>
+              <span>Summarizer input budget</span>
+              <input id="smp-input-budget" class="text_pole" type="number" min="8192" max="1000000" step="1024">
+            </label>
+            <label>
+              <span>Maximum useful output tokens</span>
+              <input id="smp-output-budget" class="text_pole" type="number" min="1024" max="65536" step="512">
+              <small class="smp-field-hint">Hidden reasoning receives a separate reserve.</small>
+            </label>
+            <label>
+              <span>Connection profile</span>
+              <select id="smp-summary-profile" class="text_pole"></select>
+            </label>
+            <label>
+              <span>Injected memory role</span>
+              <select id="smp-summary-role" class="text_pole">
+                <option value="system">System / narrator</option>
+                <option value="user">User</option>
+                <option value="assistant">Assistant</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="checkbox_label">
+            <input id="smp-structured" type="checkbox">
+            <span>Inject structured ledger with narrative</span>
+          </label>
+
+          <div class="smp-actions">
+            <button id="smp-test-summarizer" class="menu_button" type="button">
+              <i class="fa-solid fa-flask"></i><span>Test summarizer</span>
+            </button>
+            <button id="smp-cancel" class="menu_button" type="button">
+              <i class="fa-solid fa-stop"></i><span>Cancel job</span>
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <details class="smp-submenu" data-section="prompts">
+        <summary><i class="fa-solid fa-terminal"></i><span>Summary prompts</span></summary>
+        <div class="smp-submenu-content">
+          <div class="smp-info-note">
+            Available placeholders: <code>&#123;&#123;target_tokens&#125;&#125;</code>, <code>&#123;&#123;level&#125;&#125;</code>, and <code>&#123;&#123;schema&#125;&#125;</code>.
+          </div>
+
+          <label class="smp-prompt-field">
+            <span>Raw chat → L1</span>
+            <textarea id="smp-prompt-raw" class="text_pole" rows="12"></textarea>
+          </label>
+          <label class="smp-prompt-field">
+            <span>Memory blocks → rollup</span>
+            <textarea id="smp-prompt-rollup" class="text_pole" rows="12"></textarea>
+          </label>
+          <label class="smp-prompt-field">
+            <span>Oversized result → reduced block</span>
+            <textarea id="smp-prompt-reduce" class="text_pole" rows="10"></textarea>
+          </label>
+
+          <div class="smp-actions">
+            <button id="smp-reset-prompts" class="menu_button" type="button">
+              <i class="fa-solid fa-arrow-rotate-left"></i><span>Restore default prompts</span>
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <details class="smp-submenu" data-section="runtime">
+        <summary><i class="fa-solid fa-gauge-high"></i><span>Runtime and maintenance</span></summary>
+        <div class="smp-submenu-content">
+          <div id="smp-status" class="smp-status" data-kind="idle">Ready.</div>
+          <div id="smp-stats" class="smp-stats">Active blocks: 0</div>
+
+          <label class="checkbox_label">
+            <input id="smp-debug" type="checkbox">
+            <span>Debug logging</span>
+          </label>
+
+          <div class="smp-actions">
+            <button id="smp-compact-now" class="menu_button" type="button">
+              <i class="fa-solid fa-compress"></i><span>Compact now</span>
+            </button>
+            <button id="smp-refresh" class="menu_button" type="button">
+              <i class="fa-solid fa-rotate"></i><span>Refresh</span>
+            </button>
+            <button id="smp-export" class="menu_button" type="button">
+              <i class="fa-solid fa-file-export"></i><span>Export JSON</span>
+            </button>
+            <button id="smp-clear" class="menu_button redWarningBG" type="button">
+              <i class="fa-solid fa-trash"></i><span>Clear current chat</span>
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <details class="smp-submenu" data-section="memory" open>
+        <summary><i class="fa-solid fa-box-archive"></i><span>Current chat memory</span></summary>
+        <div class="smp-submenu-content">
+          <div class="smp-library-head">
+            <b>Saved blocks</b>
+            <span>Click a block header to select it. Hiding a summary restores its original raw messages in the model context.</span>
+          </div>
+
+          <div class="smp-rollup-panel">
+            <div>
+              <b>Manual merge</b>
+              <span id="smp-rollup-selection">Select at least two adjacent active blocks of the same level.</span>
+            </div>
+            <button id="smp-rollup-selected" class="menu_button" type="button" disabled>
+              <i class="fa-solid fa-layer-group"></i><span>Merge selected</span>
+            </button>
+          </div>
+
+          <div id="smp-block-actions" class="smp-block-actions" aria-live="polite">
+            <span id="smp-selected-block">No block selected.</span>
+            <div class="smp-block-action-buttons">
+              <button id="smp-regenerate-block" class="menu_button" type="button" disabled>
+                <i class="fa-solid fa-arrows-rotate"></i><span>Regenerate</span>
+              </button>
+              <button id="smp-copy-block" class="menu_button" type="button" disabled>
+                <i class="fa-solid fa-copy"></i><span>Copy JSON</span>
+              </button>
+              <button id="smp-export-block" class="menu_button" type="button" disabled>
+                <i class="fa-solid fa-file-arrow-down"></i><span>Export block</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="smp-library" class="smp-library"></div>
+        </div>
+      </details>
+    </div>
+  </div>
+</div>
