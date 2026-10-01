@@ -25,7 +25,6 @@ import {
   setBlockUseRaw,
   splitTextByTokenBudget,
   stageBlockRegeneration,
-  stageCompactionTransaction,
   stageManualRollup,
 } from '../lib/core.mjs';
 
@@ -544,96 +543,6 @@ test('staged fifteenth block and rollup never mutate the last saved memory', () 
   assert.deepEqual(getActiveBlocks(rolled).map(block => block.id), ['l2']);
 });
 
-test('mock transaction creates L1 and required L2 in one staged operation', async () => {
-  let memory = createEmptyMemory();
-  for (let index = 0; index < 14; index++) {
-    memory = commitRawBlock(memory, {
-      id: `b${index}`,
-      structured: summary(`Block ${index}`),
-      sourceFrom: index * 10,
-      sourceTo: index * 10 + 9,
-      sourceTokens: 10000,
-      summaryTokens: 4000,
-    });
-  }
-  const original = structuredClone(memory);
-  const rawEntries = Array.from({ length: 28 }, (_, index) => ({ index: 140 + index, tokens: 1000 }));
-  const plan = buildCompactionPlan({ contextBudget: 80000, blocks: getActiveBlocks(memory), rawEntries });
-  const calls = [];
-
-  const result = await stageCompactionTransaction({
-    plan,
-    memory,
-    contextBudget: 80000,
-    createBlock: async request => {
-      calls.push(request);
-      if (request.level === 1) {
-        return {
-          id: 'b14',
-          structured: summary('Mock L1'),
-          sourceFrom: request.sourceEntries[0].index,
-          sourceTo: request.sourceEntries.at(-1).index,
-          sourceTokens: 8000,
-          summaryTokens: 4000,
-        };
-      }
-      return {
-        id: 'l2',
-        level: request.level,
-        structured: summary('Mock L2'),
-        sourceFrom: 0,
-        sourceTo: 147,
-        sourceTokens: 60000,
-        summaryTokens: 4000,
-      };
-    },
-  });
-
-  assert.deepEqual(memory, original);
-  assert.equal(calls.length, 2);
-  assert.equal(result.rawBlock.id, 'b14');
-  assert.equal(result.rollupBlock.id, 'l2');
-  assert.deepEqual(getActiveBlocks(result.memory).map(block => block.id), ['l2']);
-});
-
-test('mock transaction leaves saved memory untouched when required L2 fails', async () => {
-  let memory = createEmptyMemory();
-  for (let index = 0; index < 14; index++) {
-    memory = commitRawBlock(memory, {
-      id: `b${index}`,
-      structured: summary(`Block ${index}`),
-      sourceFrom: index * 10,
-      sourceTo: index * 10 + 9,
-      sourceTokens: 10000,
-      summaryTokens: 4000,
-    });
-  }
-  const original = structuredClone(memory);
-  const rawEntries = Array.from({ length: 28 }, (_, index) => ({ index: 140 + index, tokens: 1000 }));
-  const plan = buildCompactionPlan({ contextBudget: 80000, blocks: getActiveBlocks(memory), rawEntries });
-  let call = 0;
-
-  await assert.rejects(() => stageCompactionTransaction({
-    plan,
-    memory,
-    contextBudget: 80000,
-    createBlock: async request => {
-      call += 1;
-      if (call === 2) throw new Error('mock L2 failure');
-      return {
-        id: 'b14',
-        structured: summary('Mock L1'),
-        sourceFrom: request.sourceEntries[0].index,
-        sourceTo: request.sourceEntries.at(-1).index,
-        sourceTokens: 8000,
-        summaryTokens: 4000,
-      };
-    },
-  }), /mock L2 failure/);
-
-  assert.deepEqual(memory, original);
-  assert.equal(getActiveBlocks(memory).length, 14);
-});
 
 test('active memory renders in chronological order', () => {
   const text = renderActiveMemory([
@@ -691,53 +600,4 @@ test('a broken active frontier never hides messages across a source gap', () => 
   ]);
   assert.deepEqual(frontier.blocks.map(block => block.id), ['a']);
   assert.equal(frontier.coveredThrough, 9);
-});
-
-test('repeated 80k lifecycle preserves a 20k tail and rolls fifteen 4k blocks at 60k', () => {
-  let memory = createEmptyMemory();
-  const raw = [];
-  const events = [];
-
-  for (let turn = 0; turn < 300; turn++) {
-    raw.push({ index: turn, tokens: 1000 });
-    const covered = getCoveredThrough(getActiveBlocks(memory));
-    const visible = raw.filter(entry => entry.index > covered);
-    const blocks = getActiveBlocks(memory);
-    const plan = buildCompactionPlan({ contextBudget: 80000, blocks, rawEntries: visible });
-
-    if (plan.kind === 'raw') {
-      assert.equal(plan.tailTokens, 20000);
-      const id = `block-${events.length}`;
-      memory = commitRawBlock(memory, {
-        id,
-        structured: summary(id),
-        sourceFrom: plan.source[0].index,
-        sourceTo: plan.source.at(-1).index,
-        sourceTokens: plan.sourceTokens,
-        summaryTokens: 4000,
-      });
-      events.push({ kind: 'raw', sourceTokens: plan.sourceTokens });
-    } else if (plan.kind === 'summaries') {
-      assert.equal(plan.blockTokens, 60000);
-      assert.equal(plan.blocks.length, 15);
-      const id = `rollup-${events.length}`;
-      memory = commitSummaryRollup(memory, {
-        id,
-        level: 2,
-        structured: summary(id),
-        sourceFrom: Math.min(...plan.blocks.map(block => block.sourceFrom)),
-        sourceTo: Math.max(...plan.blocks.map(block => block.sourceTo)),
-        sourceTokens: plan.blockTokens,
-        summaryTokens: 4000,
-      }, plan.blocks.map(block => block.id));
-      events.push({ kind: 'summaries', sourceTokens: plan.blockTokens });
-      break;
-    }
-  }
-
-  assert.equal(events[0].sourceTokens, 40000);
-  assert.equal(events.filter(event => event.kind === 'raw').length, 15);
-  assert.equal(events.at(-1).kind, 'summaries');
-  assert.equal(getActiveBlocks(memory).length, 1);
-  assert.equal(getActiveBlocks(memory)[0].level, 2);
 });

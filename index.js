@@ -24,6 +24,7 @@ import {
   createEmptyMemory,
   DEFAULT_PROMPTS,
   deleteMemoryBlock,
+  describeBlockedPlan,
   editMemoryBlock,
   getActiveBlocks,
   getActiveFrontier,
@@ -954,7 +955,12 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
 
     if (runtime.cancelRequested) throw new Error('Compaction cancelled');
     if (getCurrentChatId() !== chatId) throw new Error('Chat changed before memory commit');
+    for (const block of getActiveFrontier(result.memory).blocks) {
+      assertBlockSourceStillCurrent(block, chatId, 'compaction');
+    }
     await setChatMemory(result.memory, true, chatId);
+    runtime.lastPlan = result.finalPlan;
+    updateStats(result.finalPlan, result.memory);
     if (result.rawBlock && result.rollupBlock) {
       setStatus(
         'success',
@@ -1016,10 +1022,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
   updateStats(plan, memory);
 
   if (plan.kind === 'blocked') {
-    setStatus(
-      'error',
-      `Context is ${plan.overflowTokens} tokens over budget with raw memory enabled. Restore one or more summaries before generating.`,
-    );
+    setStatus('error', describeBlockedPlan(plan));
     abort?.(true);
     return;
   }
@@ -1029,6 +1032,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
       'below-trigger': 'Nothing to compact at the current trigger.',
       'no-cold-source': 'Nothing to compact while preserving the configured raw tail.',
       'source-too-small': `Cold source is smaller than the ${plan.effectiveMinimumSourceTokens}-token minimum.`,
+      'no-space-for-summary': 'The current conversation fits; there is no space for an additional memory block.',
     };
     setStatus('idle', messages[plan.reason] || 'Nothing to compact.');
   }
@@ -1036,6 +1040,8 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
   if (plan.kind !== 'none') {
     runtime.summarizing = true;
     runtime.cancelRequested = false;
+    updateBlockActionBar();
+    updateManualRollupControls();
     const chatId = getCurrentChatId();
     try {
       memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings);
@@ -1058,15 +1064,37 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
         await invalidateActiveMemory(memory, `Compaction source changed: ${errorText}`);
         memory = getChatMemory();
       } else {
-        setStatus('error', errorText);
+        setStatus(plan.totalTokens > plan.usableBudget ? 'error' : 'warning', errorText);
+      }
+      // A failed compaction cannot send an already oversized context onward.
+      if (plan.totalTokens > plan.usableBudget) {
+        abort?.(true);
+        return;
       }
     } finally {
       runtime.summarizing = false;
       runtime.cancelRequested = false;
+      updateBlockActionBar();
+      updateManualRollupControls();
     }
   }
 
   try {
+    // Check the actual saved blocks after success or a provider failure.
+    const frontier = getActiveFrontier(memory);
+    const finalRaw = await countCoreChat(coreChat.filter(message => Number(message?.index) > frontier.coveredThrough));
+    const fixedTokens = runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0;
+    const currentPlan = buildCompactionPlan({
+      contextBudget: contextSize, fixedPromptTokens: fixedTokens,
+      blocks: frontier.blocks, rawEntries: finalRaw, settings,
+    });
+    runtime.lastPlan = currentPlan;
+    updateStats(currentPlan, memory);
+    if (currentPlan.totalTokens > currentPlan.usableBudget) {
+      setStatus('error', describeBlockedPlan({ ...currentPlan, overflowTokens: currentPlan.totalTokens - currentPlan.usableBudget }));
+      abort?.(true);
+      return;
+    }
     applyMemoryToCoreChat(coreChat, memory);
   } catch (error) {
     const message = `Memory rewrite failed: ${String(error?.message || error)}`;
