@@ -53,8 +53,10 @@ import {
 import {
   BLOCK_EDITOR_FIELDS,
   renderBlockCard,
+  renderContextUsage,
   renderRegenerationComparison,
 } from './lib/ui.mjs';
+import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
 
 const EXTENSION_ID = 'silly_memories_plus';
 const EXTENSION_PATH = 'third-party/silly-memories-plus';
@@ -66,7 +68,6 @@ const runtime = {
   queued: false,
   forceCompaction: false,
   renderPromise: null,
-  lastPlan: null,
   lastStatus: { kind: 'idle', text: 'Ready.' },
   abortController: null,
   fallbackSummaryActive: false,
@@ -80,6 +81,11 @@ const runtime = {
   libraryTab: 'active',
   regenerationBlockId: null,
   regenerationPreview: null,
+  contextBudgetsByChat: new Map(),
+  contextRevision: 0,
+  contextRefreshTimer: null,
+  factsEditorChatId: null,
+  factsEditorValue: '',
 };
 let settingsInitialized = false;
 
@@ -99,6 +105,7 @@ function updateSettings(mutator) {
   mutator(draft);
   extension_settings[EXTENSION_ID] = normalizeSettings(draft);
   saveSettingsDebounced();
+  scheduleContextRefresh();
   return extension_settings[EXTENSION_ID];
 }
 
@@ -128,6 +135,7 @@ function updateJobControls() {
   const close = document.getElementById('smp-close-regeneration');
   if (close) close.hidden = Boolean(runtime.regenerationPreview);
   for (const tab of document.querySelectorAll('[data-smp-tab]')) tab.disabled = runtime.summarizing;
+  updatePinnedFactsControls();
 }
 
 function beginMemoryJob(chatId = null) {
@@ -174,6 +182,45 @@ async function setChatMemory(memory, save = true, expectedChatId = null) {
     }
   }
   renderLibrary();
+}
+
+function updatePinnedFactsControls() {
+  const input = document.getElementById('smp-pinned-facts');
+  const button = document.getElementById('smp-save-facts');
+  const state = document.getElementById('smp-facts-state');
+  if (!input || !button) return;
+  const hasChat = getCurrentChatId() != null && Boolean(getContext()?.chat?.length);
+  const changed = input.value.trim() !== runtime.factsEditorValue;
+  input.disabled = !hasChat || runtime.summarizing;
+  button.disabled = !hasChat || runtime.summarizing || !changed;
+  if (state) state.textContent = !hasChat ? 'Open a chat.' : changed ? 'Unsaved' : 'Saved';
+}
+
+function syncPinnedFactsEditor(reset = false) {
+  const input = document.getElementById('smp-pinned-facts');
+  if (!input) return;
+  const chatId = getCurrentChatId();
+  const facts = getChatMemory().pinnedFacts || '';
+  // Refresh updates saved content while leaving the current chat's draft intact.
+  if (reset || chatId !== runtime.factsEditorChatId || input.value === runtime.factsEditorValue || input.value.trim() === facts) {
+    input.value = facts;
+    runtime.factsEditorChatId = chatId;
+    runtime.factsEditorValue = facts;
+  }
+  updatePinnedFactsControls();
+}
+
+async function savePinnedFacts() {
+  if (runtime.summarizing) return;
+  const chatId = getCurrentChatId();
+  if (chatId == null || chatId !== runtime.factsEditorChatId) throw new Error('Open a chat before saving facts.');
+  const input = document.getElementById('smp-pinned-facts');
+  const memory = structuredClone(getChatMemory());
+  const facts = input.value.trim();
+  if (facts) memory.pinnedFacts = facts;
+  else delete memory.pinnedFacts;
+  await setChatMemory(memory, true, chatId);
+  setStatus('success', facts ? 'Pinned facts saved for this chat.' : 'Pinned facts cleared.');
 }
 
 function fastHash(value) {
@@ -1000,12 +1047,19 @@ function makeSyntheticMemoryMessage(text, settings) {
 
 function applyMemoryToCoreChat(coreChat, memory) {
   const settings = getSettings();
-  const result = rewriteConversationWithMemory(
+  const result = settings.enabled ? rewriteConversationWithMemory(
     coreChat,
     memory,
     text => makeSyntheticMemoryMessage(text, settings),
     settings.includeStructuredMemory,
-  );
+  ) : { messages: [...coreChat], activeBlocks: [], coveredThrough: -1 };
+  const facts = renderPinnedFacts(memory.pinnedFacts);
+  if (facts) {
+    const message = makeSyntheticMemoryMessage(facts, settings);
+    message.name = 'Pinned facts';
+    message.extra.sillyMemoriesPlusPinnedFacts = true;
+    result.messages.unshift(message);
+  }
   coreChat.splice(0, coreChat.length, ...result.messages);
   debug('Prompt rewritten', {
     activeBlocks: result.activeBlocks.length,
@@ -1019,7 +1073,14 @@ function assertBlockSourceStillCurrent(block, chatId, label) {
   if (!fingerprintsStillMatch(block.sourceFingerprints)) throw new Error(`Source changed during ${label}`);
 }
 
-async function executePlanTransaction(plan, memory, chatId, contextSize, settings) {
+function assertPinnedFactsCurrent(memory, chatId) {
+  if (chatId !== getCurrentChatId()) throw new Error('Chat changed during context preparation.');
+  if ((memory.pinnedFacts || '') !== (getChatMemory().pinnedFacts || '')) {
+    throw new Error('Pinned facts changed during context preparation. Start generation again.');
+  }
+}
+
+async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens) {
   runtime.abortController = new AbortController();
   runtime.activeCompactionChatId = chatId;
   try {
@@ -1027,7 +1088,7 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
       plan,
       memory,
       contextBudget: contextSize,
-      fixedPromptTokens: runtime.fixedPromptTokensByChat.get(String(chatId)) || 0,
+      fixedPromptTokens: (runtime.fixedPromptTokensByChat.get(String(chatId)) || 0) + pinnedTokens,
       settings,
       createBlock,
       validateBlock: (block, label) => {
@@ -1039,7 +1100,6 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
         if (kind === 'raw') {
           setStatus('working', `Compacting ${stagePlan.sourceTokens} raw tokens into ~${stagePlan.targetTokens}.`);
         } else {
-          runtime.lastPlan = stagePlan;
           setStatus('working', `Rolling ${stagePlan.blocks.length} memory blocks into L${level}.`);
         }
       },
@@ -1050,9 +1110,10 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
     for (const block of getActiveFrontier(result.memory).blocks) {
       assertBlockSourceStillCurrent(block, chatId, 'compaction');
     }
+    assertPinnedFactsCurrent(result.memory, chatId);
     await setChatMemory(result.memory, true, chatId);
-    runtime.lastPlan = result.finalPlan;
-    updateStats(result.finalPlan, result.memory);
+    updateContextFromPlan(result.finalPlan, contextSize, pinnedTokens);
+    updateStats(result.memory);
     if (result.rawBlock && result.rollupBlock) {
       setStatus(
         'success',
@@ -1075,32 +1136,48 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
 
 async function runInterceptor(coreChat, contextSize, abort, type) {
   const settings = getSettings();
-  if (!settings.enabled || !Array.isArray(coreChat) || !coreChat.length) return;
+  if (!Array.isArray(coreChat) || !coreChat.length) return;
   if (runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
+  // Synthetic facts never become a source or accumulate across interceptor calls.
+  const sourceChat = coreChat.filter(message => !message.extra?.sillyMemoriesPlusPinnedFacts);
+  if (sourceChat.length !== coreChat.length) coreChat.splice(0, coreChat.length, ...sourceChat);
+  runtime.contextBudgetsByChat.set(String(getCurrentChatId()), contextSize);
+  ++runtime.contextRevision;
+  const preparedChatId = getCurrentChatId();
 
   let memory;
   let plan;
+  let pinnedTokens = 0;
   try {
     memory = getChatMemory();
-    if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
+    if (settings.enabled && !activeMemoryIsValid(getCurrentComparableChat(), memory)) {
       await invalidateActiveMemory(memory, 'Memory source changed; active blocks marked stale.');
       memory = getChatMemory();
     }
-    memory = await repairActiveFrontier(memory);
-    memory = await refreshActiveBlockTokenCounts(memory, settings);
+    if (settings.enabled) {
+      memory = await repairActiveFrontier(memory);
+      memory = await refreshActiveBlockTokenCounts(memory, settings);
+    }
+    const facts = renderPinnedFacts(memory.pinnedFacts);
+    pinnedTokens = facts ? await getTokenCountAsync(facts, 0) : 0;
 
-    const activeFrontier = getActiveFrontier(memory);
+    const activeFrontier = settings.enabled ? getActiveFrontier(memory) : { blocks: [], coveredThrough: -1 };
     const coveredThrough = activeFrontier.coveredThrough;
     const rawMessages = coreChat.filter(message => Number(message?.index) > coveredThrough);
     const rawEntries = await countCoreChat(rawMessages);
     plan = buildCompactionPlan({
       contextBudget: contextSize,
-      fixedPromptTokens: runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0,
+      fixedPromptTokens: (runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0) + pinnedTokens,
       blocks: activeFrontier.blocks,
       rawEntries,
       settings,
       force: runtime.forceCompaction,
     });
+    if (!settings.enabled) {
+      plan = { ...plan, kind: plan.totalTokens > plan.usableBudget ? 'blocked' : 'none', reason: 'automatic-off' };
+      if (plan.kind === 'blocked') plan.overflowTokens = plan.totalTokens - plan.usableBudget;
+    }
+    assertPinnedFactsCurrent(memory, preparedChatId);
   } catch (error) {
     runtime.forceCompaction = false;
     const message = `Memory preflight failed: ${String(error?.message || error)}`;
@@ -1109,12 +1186,12 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     abort?.(true);
     return;
   }
-  runtime.lastPlan = plan;
+  updateContextFromPlan(plan, contextSize, pinnedTokens);
   runtime.forceCompaction = false;
-  updateStats(plan, memory);
+  updateStats(memory);
 
   if (plan.kind === 'blocked') {
-    setStatus('error', describeBlockedPlan(plan));
+    setStatus('error', describeContextBlock(plan, pinnedTokens));
     abort?.(true);
     return;
   }
@@ -1125,6 +1202,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
       'no-cold-source': 'Nothing to compact while preserving the configured raw tail.',
       'source-too-small': `Cold source is smaller than the ${plan.effectiveMinimumSourceTokens}-token minimum.`,
       'no-space-for-summary': 'The current conversation fits; there is no space for an additional memory block.',
+      'automatic-off': 'Automatic compaction is off.',
     };
     setStatus('idle', messages[plan.reason] || 'Nothing to compact.');
   }
@@ -1136,7 +1214,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     updateManualRollupControls();
     const chatId = getCurrentChatId();
     try {
-      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings);
+      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens);
     } catch (error) {
       const errorText = String(error?.message || error);
       if (runtime.cancelRequested) {
@@ -1174,17 +1252,21 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
 
   try {
     // Check the actual saved blocks after success or a provider failure.
-    const frontier = getActiveFrontier(memory);
+    memory = getChatMemory();
+    const frontier = settings.enabled ? getActiveFrontier(memory) : { blocks: [], coveredThrough: -1 };
     const finalRaw = await countCoreChat(coreChat.filter(message => Number(message?.index) > frontier.coveredThrough));
-    const fixedTokens = runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0;
+    const facts = renderPinnedFacts(memory.pinnedFacts);
+    pinnedTokens = facts ? await getTokenCountAsync(facts, 0) : 0;
+    assertPinnedFactsCurrent(memory, preparedChatId);
+    const fixedTokens = (runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0) + pinnedTokens;
     const currentPlan = buildCompactionPlan({
       contextBudget: contextSize, fixedPromptTokens: fixedTokens,
       blocks: frontier.blocks, rawEntries: finalRaw, settings,
     });
-    runtime.lastPlan = currentPlan;
-    updateStats(currentPlan, memory);
+    updateContextFromPlan(currentPlan, contextSize, pinnedTokens);
+    updateStats(memory);
     if (currentPlan.totalTokens > currentPlan.usableBudget) {
-      setStatus('error', describeBlockedPlan({ ...currentPlan, overflowTokens: currentPlan.totalTokens - currentPlan.usableBudget }));
+      setStatus('error', describeContextBlock({ ...currentPlan, overflowTokens: currentPlan.totalTokens - currentPlan.usableBudget }, pinnedTokens));
       abort?.(true);
       return;
     }
@@ -1205,7 +1287,76 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
   }
 }
 
-function updateStats(plan = runtime.lastPlan, memory = getChatMemory()) {
+function describeContextBlock(plan, pinnedTokens) {
+  const other = runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0;
+  const budget = runtime.contextBudgetsByChat.get(String(getCurrentChatId())) || getMaxPromptTokens();
+  const message = describeBlockedPlan({ ...plan, overflowTokens: Math.max(0, plan.totalTokens + other + pinnedTokens - budget) });
+  return pinnedTokens ? `${message} Shorten pinned facts to free context.` : message;
+}
+
+function showContextUsage(usage) {
+  const meter = document.getElementById('smp-context-meter');
+  const note = document.getElementById('smp-context-note');
+  if (!meter) return;
+  for (const key of ['used', 'budget', 'memory', 'raw', 'facts', 'other', 'free', 'triggerRemaining']) meter.dataset[key] = String(usage[key]);
+  meter.dataset.kind = usage.overflow ? 'overflow' : usage.triggerRemaining ? 'normal' : 'trigger';
+  meter.innerHTML = renderContextUsage(usage);
+  if (note) note.textContent = usage.otherKnown ? 'Estimate based on the current chat and last prompt.' : 'Other prompt size will be measured with the next generation.';
+}
+
+function updateContextFromPlan(plan, budget, facts) {
+  ++runtime.contextRevision;
+  const chatId = String(getCurrentChatId());
+  showContextUsage(getContextUsage({
+    budget, memory: plan.summaryTierTokens,
+    raw: plan.rawTokens + plan.blockTokens - plan.summaryTierTokens,
+    facts, other: runtime.fixedPromptTokensByChat.get(chatId) || 0,
+    otherKnown: runtime.fixedPromptTokensByChat.has(chatId),
+    triggerRatio: getSettings().triggerRatio, automatic: getSettings().enabled,
+  }));
+}
+
+function scheduleContextRefresh() {
+  clearTimeout(runtime.contextRefreshTimer);
+  const revision = ++runtime.contextRevision;
+  runtime.contextRefreshTimer = setTimeout(() => {
+    void refreshContextUsage(revision).catch(error => debug('Context estimate unavailable', error));
+  }, 100);
+}
+
+async function refreshContextUsage(revision) {
+  const chatId = getCurrentChatId();
+  const meter = document.getElementById('smp-context-meter');
+  if (!meter) return;
+  const chat = getCurrentComparableChat();
+  if (chatId == null || !chat.length) {
+    meter.textContent = 'Open a chat to measure context.';
+    for (const key of Object.keys(meter.dataset)) delete meter.dataset[key];
+    document.getElementById('smp-context-note').textContent = '';
+    return;
+  }
+  const settings = getSettings();
+  const memory = getChatMemory();
+  const valid = settings.enabled && activeMemoryIsValid(chat, memory);
+  const messages = valid ? rewriteConversationWithMemory(chat, memory, text => makeSyntheticMemoryMessage(text, settings), settings.includeStructuredMemory).messages : chat;
+  const counted = await countCoreChat(messages);
+  const factsText = renderPinnedFacts(memory.pinnedFacts);
+  const facts = factsText ? await getTokenCountAsync(factsText, 0) : 0;
+  // Measurements from a previous chat or an earlier refresh cannot update the UI.
+  if (revision !== runtime.contextRevision || chatId !== getCurrentChatId()) return;
+  const key = String(chatId);
+  showContextUsage(getContextUsage({
+    budget: runtime.contextBudgetsByChat.get(key) || getMaxPromptTokens(),
+    memory: sumTokens(counted.filter(entry => entry.message.extra?.sillyMemoriesPlus)),
+    raw: sumTokens(counted.filter(entry => !entry.message.extra?.sillyMemoriesPlus)),
+    facts, other: runtime.fixedPromptTokensByChat.get(key) || 0,
+    otherKnown: runtime.fixedPromptTokensByChat.has(key),
+    triggerRatio: settings.triggerRatio, automatic: settings.enabled,
+  }));
+}
+
+function updateStats(memory = getChatMemory()) {
+  scheduleContextRefresh();
   const active = getActiveBlocks(memory);
   const activeTokens = active.reduce(
     (total, block) => total + Math.max(0, Number(block.useRaw ? (block.rawTokens ?? block.sourceTokens) : block.summaryTokens) || 0),
@@ -1213,17 +1364,15 @@ function updateStats(plan = runtime.lastPlan, memory = getChatMemory()) {
   );
   const stats = document.getElementById('smp-stats');
   if (!stats) return;
-  const trigger = plan?.triggerTokens ?? '—';
-  const raw = plan?.rawTokens ?? '—';
-  const fixed = runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0;
   const exposedRaw = active.filter(block => block.useRaw).length;
-  stats.textContent = `Active blocks: ${active.length} (${activeTokens}t) · Raw blocks: ${exposedRaw} · Tail: ${raw}t · Fixed: ${fixed}t · Trigger: ${trigger}t`;
+  stats.textContent = `Active blocks: ${active.length} (${activeTokens}t) · Using original history: ${exposedRaw}`;
 }
 
 function renderLibrary() {
   const container = document.getElementById('smp-library');
   if (!container) return;
   const memory = getChatMemory();
+  syncPinnedFactsEditor();
   const blocks = memory.blocks.filter(block => runtime.libraryTab === 'active' ? block.status === 'active' : block.status !== 'active')
     .sort((a, b) => b.createdAt - a.createdAt);
   for (const tab of document.querySelectorAll('[data-smp-tab]')) {
@@ -1244,7 +1393,7 @@ function renderLibrary() {
     container.innerHTML = `<div class="smp-empty">${runtime.libraryTab === 'active' ? 'No active memory blocks.' : 'No archived memory blocks.'}</div>`;
     updateBlockActionBar(memory);
     updateManualRollupControls(memory);
-    updateStats(runtime.lastPlan, memory);
+    updateStats(memory);
     return;
   }
   if (!getBlockById(memory, runtime.selectedBlockId)) runtime.selectedBlockId = null;
@@ -1257,7 +1406,7 @@ function renderLibrary() {
   })).join('');
   updateBlockActionBar(memory);
   updateManualRollupControls(memory);
-  updateStats(runtime.lastPlan, memory);
+  updateStats(memory);
 }
 
 function bindInput(id, key, parse = value => value) {
@@ -1412,6 +1561,14 @@ async function renderSettings() {
     bindInput('smp-debug', 'debug');
     bindPromptInputs();
     populateProfiles();
+    document.getElementById('smp-pinned-facts')?.addEventListener('input', updatePinnedFactsControls);
+    document.getElementById('smp-save-facts')?.addEventListener('click', () => {
+      const chatId = getCurrentChatId();
+      void savePinnedFacts().catch(error => {
+        if (getCurrentChatId() === chatId) setStatus('error', String(error?.message || error));
+        console.error(LOG_PREFIX, error);
+      });
+    });
 
     for (const submenu of document.querySelectorAll('#smp-settings .smp-submenu')) {
       submenu.addEventListener('toggle', () => {
@@ -1443,11 +1600,12 @@ async function renderSettings() {
       setStatus('warning', 'Compaction cancellation requested.');
     });
     document.getElementById('smp-clear')?.addEventListener('click', async () => {
-      if (!confirm('Clear every saved memory block for the current chat?')) return;
+      if (!confirm('Clear summaries and pinned facts for this chat?')) return;
       runtime.selectedBlockId = null;
       runtime.manualRollupIds.clear();
       closeBlockEditor();
       await setChatMemory(createEmptyMemory());
+      syncPinnedFactsEditor(true);
       setStatus('idle', 'Current chat memory cleared.');
     });
     document.getElementById('smp-reset-prompts')?.addEventListener('click', () => {
@@ -1583,7 +1741,13 @@ function onChatChanged() {
     runtime.abortController?.abort();
     if (runtime.fallbackSummaryActive) void eventSource.emit(event_types.GENERATION_STOPPED);
   }
-  runtime.lastPlan = null;
+  ++runtime.contextRevision;
+  const meter = document.getElementById('smp-context-meter');
+  if (meter) {
+    meter.textContent = 'Measuring context…';
+    for (const key of Object.keys(meter.dataset)) delete meter.dataset[key];
+  }
+  syncPinnedFactsEditor(true);
   runtime.forceCompaction = false;
   runtime.pendingPromptMeasurement = null;
   runtime.selectedBlockId = null;
@@ -1627,9 +1791,12 @@ async function captureTextCompletionOverhead(eventData) {
 
 function clearCurrentOverheadEstimate() {
   runtime.fixedPromptTokensByChat.delete(String(getCurrentChatId()));
+  runtime.contextBudgetsByChat.delete(String(getCurrentChatId()));
+  scheduleContextRefresh();
 }
 
 async function validateAfterChatMutation(label) {
+  scheduleContextRefresh();
   const memory = getChatMemory();
   if (!getActiveBlocks(memory).length) return;
   if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
@@ -1653,5 +1820,7 @@ eventSource.on(event_types.MESSAGE_EDITED, () => void validateAfterChatMutation(
 eventSource.on(event_types.MESSAGE_UPDATED, () => void validateAfterChatMutation('Message updated'));
 eventSource.on(event_types.MESSAGE_SWIPED, () => void validateAfterChatMutation('Swipe changed'));
 eventSource.on(event_types.MESSAGE_DELETED, () => void validateAfterChatMutation('Message deleted'));
+eventSource.on(event_types.MESSAGE_SENT, scheduleContextRefresh);
+eventSource.on(event_types.MESSAGE_RECEIVED, scheduleContextRefresh);
 
 if (document.readyState !== 'loading') setTimeout(() => void renderSettings(), 0);

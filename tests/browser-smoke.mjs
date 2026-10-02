@@ -374,7 +374,7 @@ try {
 
   if (!state.settingsPresent || !state.controls || !state.promptTemplatesPresent || state.interceptorType !== 'function') process.exitCode = 1;
   if (!state.drawerCollapsed || !state.actionSpacing || !state.uniformButtonText) process.exitCode = 1;
-  if (state.thematicSubmenus.join(',') !== 'compaction,summarizer,prompts,runtime,memory' || state.openSubmenus !== 1) process.exitCode = 1;
+  if (state.thematicSubmenus.join(',') !== 'compaction,summarizer,prompts,runtime,facts,memory' || state.openSubmenus !== 1) process.exitCode = 1;
   if (!percentageSmoke.numericInputs || !percentageSmoke.triggerUpdatesTail || !percentageSmoke.tailUpdatesTrigger || !percentageSmoke.restored) process.exitCode = 1;
   if (runLiveSummarizer && !summarizerSmoke.passed) process.exitCode = 1;
   if (interceptorSmoke.aborted || interceptorSmoke.messageCount !== 2 || !interceptorSmoke.messagesPreserved) process.exitCode = 1;

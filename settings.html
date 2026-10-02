@@ -12,6 +12,10 @@
           <button id="smp-cancel" class="menu_button" type="button" disabled><i class="fa-solid fa-stop"></i><span>Stop task</span></button>
         </div>
       </div>
+      <div class="smp-context">
+        <div id="smp-context-meter">Open a chat to measure context.</div>
+        <small id="smp-context-note" class="smp-field-hint"></small>
+      </div>
       <details class="smp-submenu" data-section="compaction">
         <summary><i class="fa-solid fa-compress"></i><span>Compaction policy</span></summary>
         <div class="smp-submenu-content">
@@ -138,6 +142,19 @@
             <button id="smp-clear" class="menu_button redWarningBG" type="button">
               <i class="fa-solid fa-trash"></i><span>Clear chat memory</span>
             </button>
+          </div>
+        </div>
+      </details>
+
+      <details class="smp-submenu" data-section="facts">
+        <summary><i class="fa-solid fa-thumbtack"></i><span>Pinned facts</span></summary>
+        <div class="smp-submenu-content">
+          <label for="smp-pinned-facts">Facts for this chat</label>
+          <textarea id="smp-pinned-facts" class="text_pole" rows="6" placeholder="Mira owns the brass key. Rowan promised to return by dawn."></textarea>
+          <small class="smp-field-hint">Sent with chat generation and counted in the context budget.</small>
+          <div class="smp-actions">
+            <button id="smp-save-facts" class="menu_button" type="button" disabled><i class="fa-solid fa-check"></i><span>Save facts</span></button>
+            <span id="smp-facts-state" class="smp-field-hint"></span>
           </div>
         </div>
       </details>

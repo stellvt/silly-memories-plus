@@ -461,3 +461,95 @@
 #smp-settings .smp-content {
   container: smp / inline-size;
 }
+
+#smp-settings .smp-context {
+  padding: 10px;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+#smp-settings .smp-context-heading,
+#smp-settings .smp-context-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 5px 10px;
+}
+
+#smp-settings .smp-context-heading > span,
+#smp-settings .smp-context-legend,
+#smp-settings .smp-context-foot {
+  font-size: 0.85em;
+}
+
+#smp-settings .smp-context-track {
+  display: flex;
+  position: relative;
+  height: 12px;
+  margin: 8px 0;
+  overflow: hidden;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#smp-settings [data-part="memory"] { background: #55c98b; }
+#smp-settings [data-part="raw"] { background: #6f9bd5; }
+#smp-settings [data-part="facts"] { background: #c084fc; }
+#smp-settings [data-part="other"] { background: #a0a0a0; }
+
+#smp-settings .smp-context-segment {
+  flex-shrink: 0;
+  height: 100%;
+}
+
+#smp-settings .smp-context-trigger {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--SmartThemeBodyColor);
+}
+
+#smp-settings .smp-context-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+}
+
+#smp-settings .smp-context-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#smp-settings .smp-context-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+#smp-settings .smp-context-foot {
+  margin-top: 7px;
+}
+
+#smp-settings #smp-context-note {
+  display: block;
+  margin-top: 6px;
+}
+
+#smp-settings #smp-context-meter[data-kind="overflow"] .smp-context-heading,
+#smp-settings #smp-context-meter[data-kind="overflow"] .smp-context-foot {
+  color: var(--SmartThemeAlertColor, #d95c5c);
+}
+
+#smp-settings #smp-pinned-facts {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+}
+
+#smp-settings #smp-facts-state {
+  align-self: center;
+}
