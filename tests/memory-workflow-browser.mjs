@@ -112,7 +112,7 @@ try {
   await page.locator('[data-smp-tab="archive"]').click();
   await regenerate('a', 'Keep the key transfer and its cause.');
   await page.waitForSelector('#smp-regeneration-preview:not([hidden])');
-  await check('ancestor-preview-atomic', () => page.evaluate(() => workflow.calls.length === 4 && workflow.context.chatMetadata.silly_memories_plus.blocks.find(x => x.id === 'parent').structured.narrative === 'Saved parent.' && document.getElementById('smp-regeneration-preview').textContent.includes('dependent')));
+  await check('ancestor-preview-atomic', () => page.evaluate(() => workflow.calls.length === 4 && workflow.context.chatMetadata.silly_memories_plus.blocks.find(x => x.id === 'parent').structured.narrative === 'Saved parent.' && !document.getElementById('smp-regeneration-preview').hidden));
   await page.locator('#smp-save-preview').click();
   await page.waitForFunction(() => document.getElementById('smp-status').dataset.kind === 'success');
   await check('ancestor-accepted-together', () => page.evaluate(() => ['a', 'parent'].every(id => workflow.context.chatMetadata.silly_memories_plus.blocks.find(x => x.id === id).structured.narrative.startsWith('Regenerated'))));

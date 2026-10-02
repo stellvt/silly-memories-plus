@@ -659,7 +659,6 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
   if (!selected) throw new Error('Selected memory block no longer exists');
 
   const ids = [selected.id, ...getBlockAncestorIds(original, selected.id)];
-  const dependentCount = ids.length - 1;
   const originalMemory = JSON.stringify(original);
   const sourceSnapshot = regenerationSourceSnapshot(original, ids);
   const settings = getSettings();
@@ -710,9 +709,9 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
     assertRegenerationCurrent(preview);
     runtime.regenerationPreview = preview;
     const replacement = getBlockById(result.memory, selected.id);
-    document.getElementById('smp-regeneration-comparison').innerHTML = renderRegenerationComparison(selected, replacement, dependentCount);
+    document.getElementById('smp-regeneration-comparison').innerHTML = renderRegenerationComparison(selected, replacement);
     document.getElementById('smp-regeneration-preview').hidden = false;
-    setStatus('idle', 'Preview ready. Review the variant and save or discard it.');
+    setStatus('idle', 'Preview ready.');
   } catch (error) {
     if (getCurrentChatId() === chatId) setStatus(runtime.cancelRequested ? 'warning' : 'error', String(error?.message || error));
     throw error;
@@ -1008,9 +1007,9 @@ function updateManualRollupControls(memory = getChatMemory()) {
     else if (selected.length) {
       label.textContent = `${selected.length} × L${selected[0].level} · source ${selected[0].sourceFrom}–${selected.at(-1).sourceTo} → L${selected[0].level + 1}.`;
     } else if (runtime.manualRollupIds.size === 1) {
-      label.textContent = `L${selectedLevel} selected; select one or more adjacent L${selectedLevel} blocks.`;
+      label.textContent = `1 × L${selectedLevel}`;
     } else {
-      label.textContent = 'Select at least two adjacent active blocks of the same level.';
+      label.textContent = '';
     }
   }
   if (button instanceof HTMLButtonElement) {
@@ -1296,12 +1295,10 @@ function describeContextBlock(plan, pinnedTokens) {
 
 function showContextUsage(usage) {
   const meter = document.getElementById('smp-context-meter');
-  const note = document.getElementById('smp-context-note');
   if (!meter) return;
   for (const key of ['used', 'budget', 'memory', 'raw', 'facts', 'other', 'free', 'triggerRemaining']) meter.dataset[key] = String(usage[key]);
   meter.dataset.kind = usage.overflow ? 'overflow' : usage.triggerRemaining ? 'normal' : 'trigger';
   meter.innerHTML = renderContextUsage(usage);
-  if (note) note.textContent = usage.otherKnown ? 'Estimate based on the current chat and last prompt.' : 'Other prompt size will be measured with the next generation.';
 }
 
 function updateContextFromPlan(plan, budget, facts) {
@@ -1332,7 +1329,6 @@ async function refreshContextUsage(revision) {
   if (chatId == null || !chat.length) {
     meter.textContent = 'Open a chat to measure context.';
     for (const key of Object.keys(meter.dataset)) delete meter.dataset[key];
-    document.getElementById('smp-context-note').textContent = '';
     return;
   }
   const settings = getSettings();

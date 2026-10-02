@@ -14,7 +14,6 @@
       </div>
       <div class="smp-context">
         <div id="smp-context-meter">Open a chat to measure context.</div>
-        <small id="smp-context-note" class="smp-field-hint"></small>
       </div>
       <details class="smp-submenu" data-section="compaction">
         <summary><i class="fa-solid fa-compress"></i><span>Compaction policy</span></summary>
@@ -62,7 +61,6 @@
             <label>
               <span>Maximum useful output tokens</span>
               <input id="smp-output-budget" class="text_pole" type="number" min="1024" max="65536" step="512">
-              <small class="smp-field-hint">Hidden reasoning receives a separate reserve.</small>
             </label>
             <label>
               <span>Connection profile</span>
@@ -94,10 +92,6 @@
       <details class="smp-submenu" data-section="prompts">
         <summary><i class="fa-solid fa-terminal"></i><span>Summary prompts</span></summary>
         <div class="smp-submenu-content">
-          <div class="smp-info-note">
-            Available placeholders: <code>&#123;&#123;target_tokens&#125;&#125;</code>, <code>&#123;&#123;level&#125;&#125;</code>, and <code>&#123;&#123;schema&#125;&#125;</code>.
-          </div>
-
           <label class="smp-prompt-field">
             <span>Raw chat → L1</span>
             <textarea id="smp-prompt-raw" class="text_pole" rows="12"></textarea>
@@ -150,11 +144,10 @@
         <summary><i class="fa-solid fa-thumbtack"></i><span>Pinned facts</span></summary>
         <div class="smp-submenu-content">
           <label for="smp-pinned-facts">Facts for this chat</label>
-          <textarea id="smp-pinned-facts" class="text_pole" rows="6" placeholder="Mira owns the brass key. Rowan promised to return by dawn."></textarea>
-          <small class="smp-field-hint">Sent with chat generation and counted in the context budget.</small>
+          <textarea id="smp-pinned-facts" class="text_pole" rows="6"></textarea>
           <div class="smp-actions">
             <button id="smp-save-facts" class="menu_button" type="button" disabled><i class="fa-solid fa-check"></i><span>Save facts</span></button>
-            <span id="smp-facts-state" class="smp-field-hint"></span>
+            <span id="smp-facts-state"></span>
           </div>
         </div>
       </details>
@@ -170,7 +163,7 @@
           <div class="smp-rollup-panel">
             <div>
               <b>Manual merge</b>
-              <span id="smp-rollup-selection">Select at least two adjacent active blocks of the same level.</span>
+              <span id="smp-rollup-selection"></span>
             </div>
             <button id="smp-rollup-selected" class="menu_button" type="button" disabled>
               <i class="fa-solid fa-layer-group"></i><span>Merge blocks</span>
@@ -194,7 +187,7 @@
 
           <div id="smp-regeneration" class="smp-regeneration" hidden>
             <label for="smp-regeneration-wish">Regeneration preference (optional)</label>
-            <textarea id="smp-regeneration-wish" class="text_pole" rows="3" maxlength="2000" placeholder="Focus on relationships; keep the key transfer."></textarea>
+            <textarea id="smp-regeneration-wish" class="text_pole" rows="3" maxlength="2000"></textarea>
             <div class="smp-actions">
               <button id="smp-generate-preview" class="menu_button" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Generate preview</span></button>
               <button id="smp-close-regeneration" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span>Close</span></button>

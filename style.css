@@ -72,19 +72,18 @@
 }
 
 #smp-settings .smp-percent-input > span,
-#smp-settings .smp-field-hint,
+#smp-settings #smp-facts-state,
 #smp-settings .smp-block-meta,
 #smp-settings .smp-empty {
   opacity: 0.72;
 }
 
-#smp-settings .smp-field-hint,
+#smp-settings #smp-facts-state,
 #smp-settings .smp-block-meta,
 #smp-settings .smp-empty {
   font-size: 0.85em;
 }
 
-#smp-settings .smp-info-note,
 #smp-settings .smp-status,
 #smp-settings .smp-stats,
 #smp-settings .smp-block-actions,
@@ -93,12 +92,6 @@
   border: 1px solid var(--SmartThemeBorderColor);
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.14);
-}
-
-#smp-settings .smp-info-note {
-  border-left: 3px solid #6f83a6;
-  background: rgba(111, 131, 166, 0.1);
-  font-size: 0.9em;
 }
 
 #smp-settings .smp-status[data-kind="success"] {
@@ -448,10 +441,6 @@
   overflow-wrap: anywhere;
 }
 
-#smp-settings .smp-preview-note {
-  grid-column: 1 / -1;
-}
-
 @container smp (max-width: 600px) {
   #smp-settings .smp-regeneration-comparison {
     grid-template-columns: minmax(0, 1fr);
@@ -532,11 +521,6 @@
 
 #smp-settings .smp-context-foot {
   margin-top: 7px;
-}
-
-#smp-settings #smp-context-note {
-  display: block;
-  margin-top: 6px;
 }
 
 #smp-settings #smp-context-meter[data-kind="overflow"] .smp-context-heading,

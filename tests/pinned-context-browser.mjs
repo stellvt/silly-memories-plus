@@ -104,7 +104,16 @@ try {
   const pinned = first.outgoing.filter(x => x.extra?.sillyMemoriesPlusPinnedFacts);
   await check('single-exact-facts-message-and-chat-untouched', pinned.length === 1 && JSON.parse(pinned[0].mes).facts === facts && first.unchanged && !first.aborted);
   await check('meter-counts-facts-and-trigger', first.meter.facts > 0 && first.meter.used === first.meter.raw + first.meter.memory + first.meter.facts + first.meter.other && first.meter.free === 40000 - first.meter.used && first.meter.trigger === Math.max(0, 30000 - first.meter.used));
-  await check('unknown-other-prompt-is-labelled', await page.evaluate(() => document.getElementById('smp-context-note').textContent.includes('next generation')));
+  await check('context-and-facts-have-no-explanatory-captions', await page.evaluate(() => !document.getElementById('smp-context-note') && !document.querySelector('[data-section="facts"]').textContent.includes('Sent with')));
+  await check('menus-and-block-views-have-no-explanatory-notes', await page.evaluate(async () => {
+    const ui = await import('/scripts/extensions/third-party/silly-memories-plus/lib/ui.mjs');
+    const block = { structured: pinsTest.structured('Saved memory.') };
+    const markup = ui.renderBlockEditor(block) + ui.renderRegenerationComparison(block, block);
+    return !document.querySelector('#smp-settings .smp-info-note, #smp-settings .smp-field-hint, #smp-settings [placeholder]')
+      && !markup.includes('Ledger fields') && !markup.includes('smp-preview-note')
+      && !document.getElementById('smp-rollup-selection').textContent.includes('Select at least');
+  }));
+  await check('unknown-other-prompt-is-labelled', await page.evaluate(() => document.querySelector('.smp-context-legend').textContent.includes('Other prompt: —')));
   await check('repeated-injection-is-idempotent', await page.evaluate(async () => {
     const outgoing = pinsTest.context.chat.map((x, index) => ({ ...x, index }));
     await sillyMemoriesPlusGenerateInterceptor(outgoing, 40000, () => {}, 'normal');
@@ -117,8 +126,9 @@ try {
   });
   const measured = await generate();
   await check('other-prompt-counted-without-double-facts', measured.meter.other === 600 && measured.meter.facts === first.meter.facts);
+  await check('measured-context-has-no-estimate-caption', await page.evaluate(() => !document.querySelector('.smp-context').textContent.includes('Estimate')));
   await page.evaluate(async () => { await pinsTest.script.eventSource.emit(pinsTest.script.event_types.OAI_PRESET_CHANGED_AFTER); });
-  await page.waitForFunction(() => document.getElementById('smp-context-note').textContent.includes('next generation'));
+  await page.waitForFunction(() => document.querySelector('.smp-context-legend').textContent.includes('Other prompt: —'));
   await check('preset-invalidates-other-prompt-measurement', true);
   await openSection('runtime');
   // Export is checked through a real browser download, not an internal helper.
