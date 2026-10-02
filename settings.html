@@ -6,6 +6,12 @@
 
   <div class="inline-drawer-content">
     <div class="smp-content">
+      <div class="smp-job-status">
+        <div id="smp-status" class="smp-status" data-kind="idle" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
+        <div class="smp-actions">
+          <button id="smp-cancel" class="menu_button" type="button" disabled><i class="fa-solid fa-stop"></i><span>Stop task</span></button>
+        </div>
+      </div>
       <details class="smp-submenu" data-section="compaction">
         <summary><i class="fa-solid fa-compress"></i><span>Compaction policy</span></summary>
         <div class="smp-submenu-content">
@@ -77,9 +83,6 @@
             <button id="smp-test-summarizer" class="menu_button" type="button">
               <i class="fa-solid fa-flask"></i><span>Test summarizer</span>
             </button>
-            <button id="smp-cancel" class="menu_button" type="button">
-              <i class="fa-solid fa-stop"></i><span>Cancel job</span>
-            </button>
           </div>
         </div>
       </details>
@@ -115,7 +118,6 @@
       <details class="smp-submenu" data-section="runtime">
         <summary><i class="fa-solid fa-gauge-high"></i><span>Runtime and maintenance</span></summary>
         <div class="smp-submenu-content">
-          <div id="smp-status" class="smp-status" data-kind="idle">Ready.</div>
           <div id="smp-stats" class="smp-stats">Active blocks: 0</div>
 
           <label class="checkbox_label">
@@ -125,7 +127,7 @@
 
           <div class="smp-actions">
             <button id="smp-compact-now" class="menu_button" type="button">
-              <i class="fa-solid fa-compress"></i><span>Compact now</span>
+              <i class="fa-solid fa-compress"></i><span>Summarize history</span>
             </button>
             <button id="smp-refresh" class="menu_button" type="button">
               <i class="fa-solid fa-rotate"></i><span>Refresh</span>
@@ -134,7 +136,7 @@
               <i class="fa-solid fa-file-export"></i><span>Export JSON</span>
             </button>
             <button id="smp-clear" class="menu_button redWarningBG" type="button">
-              <i class="fa-solid fa-trash"></i><span>Clear current chat</span>
+              <i class="fa-solid fa-trash"></i><span>Clear chat memory</span>
             </button>
           </div>
         </div>
@@ -143,9 +145,9 @@
       <details class="smp-submenu" data-section="memory" open>
         <summary><i class="fa-solid fa-box-archive"></i><span>Current chat memory</span></summary>
         <div class="smp-submenu-content">
-          <div class="smp-library-head">
-            <b>Saved blocks</b>
-            <span>Click a block header to select it. Hiding a summary restores its original raw messages in the model context.</span>
+          <div class="smp-library-tabs" role="tablist" aria-label="Memory blocks">
+            <button id="smp-tab-active" class="menu_button smp-library-tab selected" type="button" role="tab" data-smp-tab="active" aria-selected="true" aria-controls="smp-library"><i class="fa-solid fa-layer-group"></i><span>Active</span><span data-smp-count="active">0</span></button>
+            <button id="smp-tab-archive" class="menu_button smp-library-tab" type="button" role="tab" data-smp-tab="archive" aria-selected="false" aria-controls="smp-library" tabindex="-1"><i class="fa-solid fa-box-archive"></i><span>Archive</span><span data-smp-count="archive">0</span></button>
           </div>
 
           <div class="smp-rollup-panel">
@@ -154,7 +156,7 @@
               <span id="smp-rollup-selection">Select at least two adjacent active blocks of the same level.</span>
             </div>
             <button id="smp-rollup-selected" class="menu_button" type="button" disabled>
-              <i class="fa-solid fa-layer-group"></i><span>Merge selected</span>
+              <i class="fa-solid fa-layer-group"></i><span>Merge blocks</span>
             </button>
           </div>
 
@@ -162,7 +164,7 @@
             <span id="smp-selected-block">No block selected.</span>
             <div class="smp-block-action-buttons">
               <button id="smp-regenerate-block" class="menu_button" type="button" disabled>
-                <i class="fa-solid fa-arrows-rotate"></i><span>Regenerate</span>
+                <i class="fa-solid fa-arrows-rotate"></i><span>Regenerate block</span>
               </button>
               <button id="smp-copy-block" class="menu_button" type="button" disabled>
                 <i class="fa-solid fa-copy"></i><span>Copy JSON</span>
@@ -173,7 +175,22 @@
             </div>
           </div>
 
-          <div id="smp-library" class="smp-library"></div>
+          <div id="smp-regeneration" class="smp-regeneration" hidden>
+            <label for="smp-regeneration-wish">Regeneration preference (optional)</label>
+            <textarea id="smp-regeneration-wish" class="text_pole" rows="3" maxlength="2000" placeholder="Focus on relationships; keep the key transfer."></textarea>
+            <div class="smp-actions">
+              <button id="smp-generate-preview" class="menu_button" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Generate preview</span></button>
+              <button id="smp-close-regeneration" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span>Close</span></button>
+            </div>
+            <div id="smp-regeneration-preview" hidden>
+              <div id="smp-regeneration-comparison" class="smp-regeneration-comparison"></div>
+              <div class="smp-actions">
+                <button id="smp-save-preview" class="menu_button" type="button"><i class="fa-solid fa-check"></i><span>Save replacement</span></button>
+                <button id="smp-discard-preview" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span>Discard preview</span></button>
+              </div>
+            </div>
+          </div>
+          <div id="smp-library" class="smp-library" role="tabpanel" aria-labelledby="smp-tab-active"></div>
         </div>
       </details>
     </div>

@@ -53,6 +53,7 @@ import {
 import {
   BLOCK_EDITOR_FIELDS,
   renderBlockCard,
+  renderRegenerationComparison,
 } from './lib/ui.mjs';
 
 const EXTENSION_ID = 'silly_memories_plus';
@@ -76,6 +77,9 @@ const runtime = {
   selectedBlockId: null,
   editingBlockId: null,
   manualRollupIds: new Set(),
+  libraryTab: 'active',
+  regenerationBlockId: null,
+  regenerationPreview: null,
 };
 let settingsInitialized = false;
 
@@ -109,6 +113,21 @@ function setStatus(kind, text) {
     element.dataset.kind = kind;
     element.textContent = text;
   }
+  updateJobControls();
+}
+
+function updateJobControls() {
+  const cancel = document.getElementById('smp-cancel');
+  if (cancel) cancel.disabled = !runtime.summarizing || runtime.cancelRequested;
+  for (const id of ['smp-generate-preview', 'smp-save-preview', 'smp-close-regeneration', 'smp-discard-preview', 'smp-compact-now', 'smp-test-summarizer', 'smp-clear']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = runtime.summarizing || (id === 'smp-save-preview' && !runtime.regenerationPreview);
+  }
+  const wish = document.getElementById('smp-regeneration-wish');
+  if (wish) wish.disabled = runtime.summarizing;
+  const close = document.getElementById('smp-close-regeneration');
+  if (close) close.hidden = Boolean(runtime.regenerationPreview);
+  for (const tab of document.querySelectorAll('[data-smp-tab]')) tab.disabled = runtime.summarizing;
 }
 
 function beginMemoryJob(chatId = null) {
@@ -119,6 +138,7 @@ function beginMemoryJob(chatId = null) {
   runtime.activeCompactionChatId = chatId;
   updateBlockActionBar();
   updateManualRollupControls();
+  updateJobControls();
 }
 
 function endMemoryJob() {
@@ -128,6 +148,7 @@ function endMemoryJob() {
   runtime.cancelRequested = false;
   updateBlockActionBar();
   updateManualRollupControls();
+  updateJobControls();
 }
 
 function getChatMemory() {
@@ -144,6 +165,7 @@ async function setChatMemory(memory, save = true, expectedChatId = null) {
   }
   const context = getContext();
   if (!Array.isArray(context?.chat) || !context.chat.length) return;
+  closeRegeneration();
   chat_metadata[MEMORY_KEY] = normalizeMemory(memory);
   if (save) {
     await saveChatConditional();
@@ -266,7 +288,7 @@ async function refreshActiveBlockTokenCounts(memory, settings) {
   return memory;
 }
 
-async function requestSummary(prompt, targetTokens, level, stage) {
+async function requestSummary(prompt, targetTokens, level, stage, instruction = '') {
   if (runtime.cancelRequested) throw new Error('Compaction cancelled');
   if (runtime.activeCompactionChatId !== null && getCurrentChatId() !== runtime.activeCompactionChatId) {
     throw new Error('Chat changed during compaction');
@@ -278,6 +300,7 @@ async function requestSummary(prompt, targetTokens, level, stage) {
     stage,
     targetTokens,
     level,
+    instruction,
     countTokens,
   });
   await assertSummaryRequestFits({ settings, prompt, systemPrompt, requestMaxTokens, countTokens });
@@ -365,21 +388,22 @@ async function requestSummary(prompt, targetTokens, level, stage) {
   }
 }
 
-async function requestStructuredSummary(prompt, targetTokens, level, stage, label) {
+async function requestStructuredSummary(prompt, targetTokens, level, stage, label, instruction = '') {
   try {
-    return parseStructuredSummary(await requestSummary(prompt, targetTokens, level, stage));
+    return parseStructuredSummary(await requestSummary(prompt, targetTokens, level, stage, instruction));
   } catch (error) {
     throw new Error(`${label} failed strict validation`, { cause: error });
   }
 }
 
-async function reduceStructuredSummaries(parts, targetTokens, level, round = 1) {
+async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, instruction = '') {
   if (round > 12) throw new Error('Map/reduce did not converge within 12 rounds');
   const { sourceBudget: inputBudget } = await getSummarySourceBudget({
     settings: getSettings(),
     stage: 'rollup',
     targetTokens,
     level,
+    instruction,
     countTokens: value => getTokenCountAsync(value, 0),
   });
   const entries = await Promise.all(parts.map(async part => {
@@ -389,7 +413,7 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1) 
   const groups = chunkByTokenBudget(entries, Math.max(512, Math.floor(inputBudget * 0.9)));
 
   if (groups.length === 1) {
-    return await requestSummary(formatIntermediateSources(groups[0].map(entry => entry.part)), targetTokens, level, 'rollup');
+    return await requestSummary(formatIntermediateSources(groups[0].map(entry => entry.part)), targetTokens, level, 'rollup', instruction);
   }
 
   setStatus('working', `Recursive reduce round ${round}: ${parts.length} memories in ${groups.length} chunks.`);
@@ -402,12 +426,13 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1) 
       level,
       'rollup',
       `Reduce summary ${round}.${index + 1}`,
+      instruction,
     ));
   }
-  return await reduceStructuredSummaries(next, targetTokens, level + 1, round + 1);
+  return await reduceStructuredSummaries(next, targetTokens, level + 1, round + 1, instruction);
 }
 
-async function createBlock({ level, sourceEntries = [], childBlocks = [], targetTokens }) {
+async function createBlock({ level, sourceEntries = [], childBlocks = [], targetTokens, instruction = '' }) {
   const isRaw = level === 1;
   const settings = getSettings();
   const stage = isRaw ? 'raw' : 'rollup';
@@ -417,6 +442,7 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
     stage,
     targetTokens,
     level,
+    instruction,
     countTokens,
   });
   const sourceUnits = isRaw ? await splitOversizedRawEntries(sourceEntries, inputBudget, countTokens) : childBlocks;
@@ -430,7 +456,7 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
   let responseText = '';
   if (groups.length === 1) {
     const prompt = isRaw ? formatRawSources(groups[0]) : formatSummarySources(groups[0]);
-    responseText = await requestSummary(prompt, targetTokens, level, stage);
+    responseText = await requestSummary(prompt, targetTokens, level, stage, instruction);
   } else {
     setStatus('working', `Map/reduce compaction: ${groups.length} source chunks.`);
     const intermediateTarget = Math.max(512, Math.min(2000, targetTokens));
@@ -443,9 +469,10 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
         level,
         stage,
         `Intermediate summary ${index + 1}`,
+        instruction,
       ));
     }
-    responseText = await reduceStructuredSummaries(intermediate, targetTokens, level + 1);
+    responseText = await reduceStructuredSummaries(intermediate, targetTokens, level + 1, 1, instruction);
   }
   let structured = parseStructuredSummary(responseText);
 
@@ -489,7 +516,7 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
 
   block.summaryTokens = await getTokenCountAsync(renderBlockText(block, settings.includeStructuredMemory), 0);
   if (block.summaryTokens > targetTokens) {
-    const reducedText = await requestSummary(JSON.stringify(structured), targetTokens, level, 'reduce');
+    const reducedText = await requestSummary(JSON.stringify(structured), targetTokens, level, 'reduce', instruction);
     structured = parseStructuredSummary(reducedText);
     block = { ...block, structured };
     block.summaryTokens = await getTokenCountAsync(renderBlockText(block, settings.includeStructuredMemory), 0);
@@ -526,7 +553,57 @@ function refreshBlockSourceIdentity(block) {
   return block;
 }
 
-async function regenerateMemoryBlock(blockId) {
+function closeRegeneration() {
+  runtime.regenerationBlockId = null;
+  runtime.regenerationPreview = null;
+  const panel = document.getElementById('smp-regeneration');
+  const preview = document.getElementById('smp-regeneration-preview');
+  const comparison = document.getElementById('smp-regeneration-comparison');
+  if (panel) panel.hidden = true;
+  if (preview) preview.hidden = true;
+  if (comparison) comparison.replaceChildren();
+  updateJobControls();
+}
+
+function openRegeneration(blockId) {
+  if (runtime.summarizing || !getBlockById(getChatMemory(), blockId)) return;
+  closeBlockEditor();
+  closeRegeneration();
+  runtime.regenerationBlockId = blockId;
+  document.getElementById('smp-regeneration').hidden = false;
+  const wish = document.getElementById('smp-regeneration-wish');
+  wish.value = '';
+  wish.focus();
+}
+
+function regenerationSourceSnapshot(memory, ids) {
+  const blocks = memory.blocks.filter(block => ids.includes(block.id));
+  return JSON.stringify(getCurrentComparableChat()
+    .filter(message => blocks.some(block => message.index >= block.sourceFrom && message.index <= block.sourceTo))
+    .map(fingerprintMessage));
+}
+
+function assertRegenerationCurrent(preview) {
+  // A preview replaces only the graph and source snapshot it was generated from.
+  if (getCurrentChatId() !== preview.chatId) throw new Error('Chat changed; generate a new preview.');
+  if (JSON.stringify(getChatMemory()) !== preview.originalMemory) throw new Error('Memory changed; generate a new preview.');
+  if (regenerationSourceSnapshot(preview.memory, preview.ids) !== preview.sourceSnapshot) {
+    throw new Error('Source messages changed; generate a new preview.');
+  }
+  for (const id of preview.ids) assertBlockSourceStillCurrent(getBlockById(preview.memory, id), preview.chatId, 'Regeneration preview');
+}
+
+async function saveRegenerationPreview() {
+  const preview = runtime.regenerationPreview;
+  if (!preview || runtime.summarizing) return;
+  assertRegenerationCurrent(preview);
+  runtime.selectedBlockId = preview.blockId;
+  closeRegeneration();
+  await setChatMemory(preview.memory, true, preview.chatId);
+  setStatus('success', `Saved block replacement${preview.ids.length > 1 ? ` and ${preview.ids.length - 1} dependent merge(s)` : ''}.`);
+}
+
+async function regenerateMemoryBlock(blockId, instruction = '') {
   if (runtime.summarizing) throw new Error('Another compaction job is already running');
   const chatId = getCurrentChatId();
   if (chatId == null) throw new Error('No active chat');
@@ -534,9 +611,14 @@ async function regenerateMemoryBlock(blockId) {
   const selected = getBlockById(original, blockId);
   if (!selected) throw new Error('Selected memory block no longer exists');
 
-  const dependentCount = getBlockAncestorIds(original, selected.id).length;
+  const ids = [selected.id, ...getBlockAncestorIds(original, selected.id)];
+  const dependentCount = ids.length - 1;
+  const originalMemory = JSON.stringify(original);
+  const sourceSnapshot = regenerationSourceSnapshot(original, ids);
   const settings = getSettings();
 
+  runtime.regenerationPreview = null;
+  document.getElementById('smp-regeneration-preview').hidden = true;
   beginMemoryJob(chatId);
   try {
     const result = await stageBlockRegeneration({
@@ -557,6 +639,7 @@ async function regenerateMemoryBlock(blockId) {
             level: 1,
             sourceEntries: await countCoreChat(getBlockRangeMessages(current)),
             targetTokens: settings.blockTargetTokens,
+            instruction,
           });
         } else {
           const childBlocks = current.children.map(childId => getBlockById(candidate, childId));
@@ -567,6 +650,7 @@ async function regenerateMemoryBlock(blockId) {
             level: current.level,
             childBlocks,
             targetTokens: settings.blockTargetTokens,
+            instruction,
           });
         }
         return refreshBlockSourceIdentity({ ...generated, createdAt: Date.now() });
@@ -575,12 +659,15 @@ async function regenerateMemoryBlock(blockId) {
 
     if (runtime.cancelRequested) throw new Error('Block regeneration cancelled');
     if (getCurrentChatId() !== chatId) throw new Error('Chat changed before regenerated block commit');
-    runtime.selectedBlockId = selected.id;
-    await setChatMemory(result.memory, true, chatId);
-    setStatus('success', `Regenerated selected block and ${dependentCount} dependent rollup(s).`);
-    return result.memory;
+    const preview = { memory: result.memory, originalMemory, sourceSnapshot, ids, blockId: selected.id, chatId };
+    assertRegenerationCurrent(preview);
+    runtime.regenerationPreview = preview;
+    const replacement = getBlockById(result.memory, selected.id);
+    document.getElementById('smp-regeneration-comparison').innerHTML = renderRegenerationComparison(selected, replacement, dependentCount);
+    document.getElementById('smp-regeneration-preview').hidden = false;
+    setStatus('idle', 'Preview ready. Review the variant and save or discard it.');
   } catch (error) {
-    setStatus('error', String(error?.message || error));
+    if (getCurrentChatId() === chatId) setStatus(runtime.cancelRequested ? 'warning' : 'error', String(error?.message || error));
     throw error;
   } finally {
     endMemoryJob();
@@ -643,7 +730,7 @@ async function toggleBlockRawSource(blockId) {
     runtime.manualRollupIds.delete(block.id);
   }
   await setChatMemory(next);
-  setStatus('success', useRaw ? 'Block summary hidden; raw source restored.' : 'Block summary restored; raw source hidden.');
+  setStatus('success', useRaw ? 'Using original history for this block.' : 'Using summary for this block.');
 }
 
 async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
@@ -694,6 +781,8 @@ function closeBlockEditor(blockId = runtime.editingBlockId) {
 }
 
 function openBlockEditor(blockId) {
+  if (runtime.summarizing) return;
+  closeRegeneration();
   const memory = getChatMemory();
   const block = getBlockById(memory, blockId);
   if (!block) return;
@@ -713,6 +802,8 @@ function readBlockEditor(blockElement) {
   const narrative = blockElement?.querySelector('textarea[data-field="narrative"]');
   if (!(narrative instanceof HTMLTextAreaElement)) throw new Error('Block editor is unavailable');
   const structured = { narrative: narrative.value.trim() };
+  const title = blockElement.querySelector('input[data-field="title"]')?.value.trim();
+  if (title) structured.title = title;
   for (const [field] of BLOCK_EDITOR_FIELDS) {
     const textarea = blockElement.querySelector(`textarea[data-field="${field}"]`);
     if (!(textarea instanceof HTMLTextAreaElement)) throw new Error(`Block editor field ${field} is unavailable`);
@@ -814,6 +905,7 @@ function exportSelectedBlock() {
 function selectMemoryBlock(blockId) {
   const memory = getChatMemory();
   const nextId = getBlockById(memory, blockId)?.id || null;
+  if (!runtime.summarizing && runtime.regenerationBlockId && runtime.regenerationBlockId !== nextId) closeRegeneration();
   if (runtime.editingBlockId && runtime.editingBlockId !== nextId) closeBlockEditor(runtime.editingBlockId);
   runtime.selectedBlockId = nextId;
   for (const element of document.querySelectorAll('#smp-library .smp-block')) {
@@ -877,7 +969,7 @@ function updateManualRollupControls(memory = getChatMemory()) {
   if (button instanceof HTMLButtonElement) {
     button.disabled = runtime.summarizing || selected.length < 2 || Boolean(error);
     const text = button.querySelector('span');
-    if (text) text.textContent = selectedLevel === null ? 'Merge selected' : `Merge L${selectedLevel} → L${selectedLevel + 1}`;
+    if (text) text.textContent = selectedLevel === null ? 'Merge blocks' : `Merge L${selectedLevel} → L${selectedLevel + 1}`;
   }
   for (const control of document.querySelectorAll('#smp-library [data-smp-rollup-select]')) {
     if (!(control instanceof HTMLButtonElement)) continue;
@@ -1076,6 +1168,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
       runtime.cancelRequested = false;
       updateBlockActionBar();
       updateManualRollupControls();
+      updateJobControls();
     }
   }
 
@@ -1131,11 +1224,24 @@ function renderLibrary() {
   const container = document.getElementById('smp-library');
   if (!container) return;
   const memory = getChatMemory();
-  const blocks = [...memory.blocks].sort((a, b) => b.createdAt - a.createdAt);
+  const blocks = memory.blocks.filter(block => runtime.libraryTab === 'active' ? block.status === 'active' : block.status !== 'active')
+    .sort((a, b) => b.createdAt - a.createdAt);
+  for (const tab of document.querySelectorAll('[data-smp-tab]')) {
+    const selected = tab.dataset.smpTab === runtime.libraryTab;
+    tab.classList.toggle('selected', selected);
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    const count = memory.blocks.filter(block => tab.dataset.smpTab === 'active' ? block.status === 'active' : block.status !== 'active').length;
+    tab.querySelector('[data-smp-count]').textContent = String(count);
+  }
+  container.setAttribute('aria-labelledby', `smp-tab-${runtime.libraryTab}`);
+  document.querySelector('#smp-settings .smp-rollup-panel').hidden = runtime.libraryTab !== 'active';
+  if (!blocks.some(block => block.id === runtime.selectedBlockId)) runtime.selectedBlockId = null;
+  if (!blocks.some(block => block.id === runtime.editingBlockId)) runtime.editingBlockId = null;
   if (!blocks.length) {
     runtime.selectedBlockId = null;
     runtime.editingBlockId = null;
-    container.innerHTML = '<div class="smp-empty">No memory blocks in this chat.</div>';
+    container.innerHTML = `<div class="smp-empty">${runtime.libraryTab === 'active' ? 'No active memory blocks.' : 'No archived memory blocks.'}</div>`;
     updateBlockActionBar(memory);
     updateManualRollupControls(memory);
     updateStats(runtime.lastPlan, memory);
@@ -1403,13 +1509,51 @@ async function renderSettings() {
       const memory = getChatMemory();
       const block = getBlockById(memory, runtime.selectedBlockId);
       if (!block || runtime.summarizing) return;
-      const dependentCount = getBlockAncestorIds(memory, block.id).length;
-      const message = dependentCount
-        ? `Regenerate L${block.level} and ${dependentCount} dependent rollup(s)? This may perform multiple model calls.`
-        : `Regenerate selected L${block.level} block?`;
-      if (!confirm(message)) return;
-      void regenerateMemoryBlock(block.id).catch(error => console.error(LOG_PREFIX, error));
+      openRegeneration(block.id);
     });
+    document.getElementById('smp-generate-preview')?.addEventListener('click', () => {
+      if (!runtime.regenerationBlockId || runtime.summarizing) return;
+      const instruction = document.getElementById('smp-regeneration-wish').value.trim();
+      void regenerateMemoryBlock(runtime.regenerationBlockId, instruction).catch(error => {
+        const message = String(error?.message || error);
+        if (runtime.regenerationBlockId && runtime.lastStatus.text !== message) setStatus('error', message);
+        console.error(LOG_PREFIX, error);
+      });
+    });
+    document.getElementById('smp-save-preview')?.addEventListener('click', () => {
+      void saveRegenerationPreview().catch(error => {
+        runtime.regenerationPreview = null;
+        setStatus('error', String(error?.message || error));
+        console.error(LOG_PREFIX, error);
+      });
+    });
+    for (const id of ['smp-discard-preview', 'smp-close-regeneration']) {
+      document.getElementById(id)?.addEventListener('click', () => {
+        if (runtime.summarizing) return;
+        closeRegeneration();
+        setStatus('idle', 'Ready.');
+      });
+    }
+    const selectLibraryTab = tab => {
+      if (runtime.summarizing) return;
+      closeBlockEditor();
+      closeRegeneration();
+      runtime.libraryTab = tab.dataset.smpTab;
+      runtime.selectedBlockId = null;
+      runtime.manualRollupIds.clear();
+      renderLibrary();
+    };
+    for (const tab of document.querySelectorAll('[data-smp-tab]')) {
+      tab.addEventListener('click', () => selectLibraryTab(tab));
+      tab.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const tabs = [...document.querySelectorAll('[data-smp-tab]')];
+        const next = event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : tabs.find(item => item !== tab);
+        selectLibraryTab(next);
+        next.focus();
+      });
+    }
     document.getElementById('smp-copy-block')?.addEventListener('click', () => {
       void copySelectedBlockJson().catch(error => {
         setStatus('error', String(error?.message || error));
@@ -1443,6 +1587,8 @@ function onChatChanged() {
   runtime.forceCompaction = false;
   runtime.pendingPromptMeasurement = null;
   runtime.selectedBlockId = null;
+  runtime.libraryTab = 'active';
+  closeRegeneration();
   runtime.manualRollupIds.clear();
   closeBlockEditor();
   renderLibrary();
