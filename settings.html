@@ -9,41 +9,41 @@
       <div class="smp-job-status">
         <div id="smp-status" class="smp-status" data-kind="idle" role="status" aria-live="polite" aria-atomic="true">Ready.</div>
         <div class="smp-actions">
-          <button id="smp-cancel" class="menu_button" type="button" disabled><i class="fa-solid fa-stop"></i><span>Stop task</span></button>
+          <button id="smp-cancel" class="menu_button" type="button" disabled><i class="fa-solid fa-stop"></i><span data-smp-i18n="Stop task">Stop task</span></button>
         </div>
       </div>
       <div class="smp-context">
-        <div id="smp-context-meter">Open a chat to measure context.</div>
+        <div id="smp-context-meter" data-smp-i18n="Open a chat to measure context.">Open a chat to measure context.</div>
       </div>
       <details class="smp-submenu" data-section="compaction">
-        <summary><i class="fa-solid fa-compress"></i><span>Compaction policy</span></summary>
+        <summary><i class="fa-solid fa-compress"></i><span data-smp-i18n="Compaction policy">Compaction policy</span></summary>
         <div class="smp-submenu-content">
           <label class="checkbox_label">
             <input id="smp-enabled" type="checkbox">
-            <span>Enable automatic compaction</span>
+            <span data-smp-i18n="Enable automatic compaction">Enable automatic compaction</span>
           </label>
 
           <div class="smp-grid">
             <label>
-              <span>Compaction trigger</span>
+              <span data-smp-i18n="Compaction trigger">Compaction trigger</span>
               <div class="smp-percent-input">
                 <input id="smp-trigger" class="text_pole" type="number" min="50" max="95" step="1" inputmode="numeric">
                 <span aria-hidden="true">%</span>
               </div>
             </label>
             <label>
-              <span>Raw tail</span>
+              <span data-smp-i18n="Raw tail">Raw tail</span>
               <div class="smp-percent-input">
                 <input id="smp-tail" class="text_pole" type="number" min="5" max="50" step="1" inputmode="numeric">
                 <span aria-hidden="true">%</span>
               </div>
             </label>
             <label>
-              <span>Target block tokens</span>
+              <span data-smp-i18n="Target block tokens">Target block tokens</span>
               <input id="smp-block-target" class="text_pole" type="number" min="256" max="16384" step="128">
             </label>
             <label>
-              <span>Minimum source tokens</span>
+              <span data-smp-i18n="Minimum source tokens">Minimum source tokens</span>
               <input id="smp-min-source" class="text_pole" type="number" min="512" max="65536" step="512">
             </label>
           </div>
@@ -51,152 +51,158 @@
       </details>
 
       <details class="smp-submenu" data-section="summarizer">
-        <summary><i class="fa-solid fa-wand-magic-sparkles"></i><span>Summarizer</span></summary>
+        <summary><i class="fa-solid fa-wand-magic-sparkles"></i><span data-smp-i18n="Summarizer">Summarizer</span></summary>
         <div class="smp-submenu-content">
           <div class="smp-grid">
             <label>
-              <span>Summarizer input budget</span>
+              <span data-smp-i18n="Summarizer input budget">Summarizer input budget</span>
               <input id="smp-input-budget" class="text_pole" type="number" min="8192" max="1000000" step="1024">
             </label>
             <label>
-              <span>Maximum useful output tokens</span>
+              <span data-smp-i18n="Maximum useful output tokens">Maximum useful output tokens</span>
               <input id="smp-output-budget" class="text_pole" type="number" min="1024" max="65536" step="512">
             </label>
             <label>
-              <span>Connection profile</span>
+              <span data-smp-i18n="Connection profile">Connection profile</span>
               <select id="smp-summary-profile" class="text_pole"></select>
             </label>
             <label>
-              <span>Injected memory role</span>
+              <span data-smp-i18n="Injected memory role">Injected memory role</span>
               <select id="smp-summary-role" class="text_pole">
-                <option value="system">System / narrator</option>
-                <option value="user">User</option>
-                <option value="assistant">Assistant</option>
+                <option value="system" data-smp-i18n="System / narrator">System / narrator</option>
+                <option value="user" data-smp-i18n="User">User</option>
+                <option value="assistant" data-smp-i18n="Assistant">Assistant</option>
               </select>
             </label>
           </div>
 
           <label class="checkbox_label">
             <input id="smp-structured" type="checkbox">
-            <span>Inject structured ledger with narrative</span>
+            <span data-smp-i18n="Inject structured ledger with narrative">Inject structured ledger with narrative</span>
           </label>
 
           <div class="smp-actions">
             <button id="smp-test-summarizer" class="menu_button" type="button">
-              <i class="fa-solid fa-flask"></i><span>Test summarizer</span>
+              <i class="fa-solid fa-flask"></i><span data-smp-i18n="Test summarizer">Test summarizer</span>
             </button>
           </div>
         </div>
       </details>
 
       <details class="smp-submenu" data-section="prompts">
-        <summary><i class="fa-solid fa-terminal"></i><span>Summary prompts</span></summary>
+        <summary><i class="fa-solid fa-terminal"></i><span data-smp-i18n="Summary prompts">Summary prompts</span></summary>
         <div class="smp-submenu-content">
           <label class="smp-prompt-field">
-            <span>Raw chat → L1</span>
+            <span data-smp-i18n="Raw chat → L1">Raw chat → L1</span>
             <textarea id="smp-prompt-raw" class="text_pole" rows="12"></textarea>
           </label>
           <label class="smp-prompt-field">
-            <span>Memory blocks → rollup</span>
+            <span data-smp-i18n="Memory blocks → rollup">Memory blocks → rollup</span>
             <textarea id="smp-prompt-rollup" class="text_pole" rows="12"></textarea>
           </label>
           <label class="smp-prompt-field">
-            <span>Oversized result → reduced block</span>
+            <span data-smp-i18n="Oversized result → reduced block">Oversized result → reduced block</span>
             <textarea id="smp-prompt-reduce" class="text_pole" rows="10"></textarea>
           </label>
 
           <div class="smp-actions">
             <button id="smp-reset-prompts" class="menu_button" type="button">
-              <i class="fa-solid fa-arrow-rotate-left"></i><span>Restore default prompts</span>
+              <i class="fa-solid fa-arrow-rotate-left"></i><span data-smp-i18n="Restore default prompts">Restore default prompts</span>
             </button>
           </div>
         </div>
       </details>
 
       <details class="smp-submenu" data-section="runtime">
-        <summary><i class="fa-solid fa-gauge-high"></i><span>Runtime and maintenance</span></summary>
+        <summary><i class="fa-solid fa-gauge-high"></i><span data-smp-i18n="Runtime and maintenance">Runtime and maintenance</span></summary>
         <div class="smp-submenu-content">
           <div id="smp-stats" class="smp-stats">Active blocks: 0</div>
 
           <label class="checkbox_label">
             <input id="smp-debug" type="checkbox">
-            <span>Debug logging</span>
+            <span data-smp-i18n="Debug logging">Debug logging</span>
           </label>
+          <label for="smp-language" data-smp-i18n="Interface language">Interface language</label>
+          <select id="smp-language" class="text_pole">
+            <option value="auto" data-smp-i18n="SillyTavern language">SillyTavern language</option>
+            <option value="en">English</option>
+            <option value="ru">Русский</option>
+          </select>
 
           <div class="smp-actions">
             <button id="smp-compact-now" class="menu_button" type="button">
-              <i class="fa-solid fa-compress"></i><span>Summarize history</span>
+              <i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize history">Summarize history</span>
             </button>
             <button id="smp-refresh" class="menu_button" type="button">
-              <i class="fa-solid fa-rotate"></i><span>Refresh</span>
+              <i class="fa-solid fa-rotate"></i><span data-smp-i18n="Refresh">Refresh</span>
             </button>
             <button id="smp-export" class="menu_button" type="button">
-              <i class="fa-solid fa-file-export"></i><span>Export JSON</span>
+              <i class="fa-solid fa-file-export"></i><span data-smp-i18n="Export JSON">Export JSON</span>
             </button>
             <button id="smp-clear" class="menu_button redWarningBG" type="button">
-              <i class="fa-solid fa-trash"></i><span>Clear chat memory</span>
+              <i class="fa-solid fa-trash"></i><span data-smp-i18n="Clear chat memory">Clear chat memory</span>
             </button>
           </div>
         </div>
       </details>
 
       <details class="smp-submenu" data-section="facts">
-        <summary><i class="fa-solid fa-thumbtack"></i><span>Pinned facts</span></summary>
+        <summary><i class="fa-solid fa-thumbtack"></i><span data-smp-i18n="Pinned facts">Pinned facts</span></summary>
         <div class="smp-submenu-content">
-          <label for="smp-pinned-facts">Facts for this chat</label>
+          <label for="smp-pinned-facts" data-smp-i18n="Facts for this chat">Facts for this chat</label>
           <textarea id="smp-pinned-facts" class="text_pole" rows="6"></textarea>
           <div class="smp-actions">
-            <button id="smp-save-facts" class="menu_button" type="button" disabled><i class="fa-solid fa-check"></i><span>Save facts</span></button>
+            <button id="smp-save-facts" class="menu_button" type="button" disabled><i class="fa-solid fa-check"></i><span data-smp-i18n="Save facts">Save facts</span></button>
             <span id="smp-facts-state"></span>
           </div>
         </div>
       </details>
 
       <details class="smp-submenu" data-section="memory" open>
-        <summary><i class="fa-solid fa-box-archive"></i><span>Current chat memory</span></summary>
+        <summary><i class="fa-solid fa-box-archive"></i><span data-smp-i18n="Current chat memory">Current chat memory</span></summary>
         <div class="smp-submenu-content">
-          <div class="smp-library-tabs" role="tablist" aria-label="Memory blocks">
-            <button id="smp-tab-active" class="menu_button smp-library-tab selected" type="button" role="tab" data-smp-tab="active" aria-selected="true" aria-controls="smp-library"><i class="fa-solid fa-layer-group"></i><span>Active</span><span data-smp-count="active">0</span></button>
-            <button id="smp-tab-archive" class="menu_button smp-library-tab" type="button" role="tab" data-smp-tab="archive" aria-selected="false" aria-controls="smp-library" tabindex="-1"><i class="fa-solid fa-box-archive"></i><span>Archive</span><span data-smp-count="archive">0</span></button>
+          <div class="smp-library-tabs" role="tablist" aria-label="Memory blocks" data-smp-i18n-aria="Memory blocks">
+            <button id="smp-tab-active" class="menu_button smp-library-tab selected" type="button" role="tab" data-smp-tab="active" aria-selected="true" aria-controls="smp-library"><i class="fa-solid fa-layer-group"></i><span data-smp-i18n="Active">Active</span><span data-smp-count="active">0</span></button>
+            <button id="smp-tab-archive" class="menu_button smp-library-tab" type="button" role="tab" data-smp-tab="archive" aria-selected="false" aria-controls="smp-library" tabindex="-1"><i class="fa-solid fa-box-archive"></i><span data-smp-i18n="Archive">Archive</span><span data-smp-count="archive">0</span></button>
           </div>
 
           <div class="smp-rollup-panel">
             <div>
-              <b>Manual merge</b>
+              <b data-smp-i18n="Manual merge">Manual merge</b>
               <span id="smp-rollup-selection"></span>
             </div>
             <button id="smp-rollup-selected" class="menu_button" type="button" disabled>
-              <i class="fa-solid fa-layer-group"></i><span>Merge blocks</span>
+              <i class="fa-solid fa-layer-group"></i><span data-smp-i18n="Merge blocks">Merge blocks</span>
             </button>
           </div>
 
           <div id="smp-block-actions" class="smp-block-actions" aria-live="polite">
-            <span id="smp-selected-block">No block selected.</span>
+            <span id="smp-selected-block" data-smp-i18n="No block selected.">No block selected.</span>
             <div class="smp-block-action-buttons">
               <button id="smp-regenerate-block" class="menu_button" type="button" disabled>
-                <i class="fa-solid fa-arrows-rotate"></i><span>Regenerate block</span>
+                <i class="fa-solid fa-arrows-rotate"></i><span data-smp-i18n="Regenerate block">Regenerate block</span>
               </button>
               <button id="smp-copy-block" class="menu_button" type="button" disabled>
-                <i class="fa-solid fa-copy"></i><span>Copy JSON</span>
+                <i class="fa-solid fa-copy"></i><span data-smp-i18n="Copy JSON">Copy JSON</span>
               </button>
               <button id="smp-export-block" class="menu_button" type="button" disabled>
-                <i class="fa-solid fa-file-arrow-down"></i><span>Export block</span>
+                <i class="fa-solid fa-file-arrow-down"></i><span data-smp-i18n="Export block">Export block</span>
               </button>
             </div>
           </div>
 
           <div id="smp-regeneration" class="smp-regeneration" hidden>
-            <label for="smp-regeneration-wish">Regeneration preference (optional)</label>
+            <label for="smp-regeneration-wish" data-smp-i18n="Regeneration preference (optional)">Regeneration preference (optional)</label>
             <textarea id="smp-regeneration-wish" class="text_pole" rows="3" maxlength="2000"></textarea>
             <div class="smp-actions">
-              <button id="smp-generate-preview" class="menu_button" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i><span>Generate preview</span></button>
-              <button id="smp-close-regeneration" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span>Close</span></button>
+              <button id="smp-generate-preview" class="menu_button" type="button"><i class="fa-solid fa-wand-magic-sparkles"></i><span data-smp-i18n="Generate preview">Generate preview</span></button>
+              <button id="smp-close-regeneration" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span data-smp-i18n="Close">Close</span></button>
             </div>
             <div id="smp-regeneration-preview" hidden>
               <div id="smp-regeneration-comparison" class="smp-regeneration-comparison"></div>
               <div class="smp-actions">
-                <button id="smp-save-preview" class="menu_button" type="button"><i class="fa-solid fa-check"></i><span>Save replacement</span></button>
-                <button id="smp-discard-preview" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span>Discard preview</span></button>
+                <button id="smp-save-preview" class="menu_button" type="button"><i class="fa-solid fa-check"></i><span data-smp-i18n="Save replacement">Save replacement</span></button>
+                <button id="smp-discard-preview" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span data-smp-i18n="Discard preview">Discard preview</span></button>
               </div>
             </div>
           </div>

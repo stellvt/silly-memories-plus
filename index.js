@@ -57,6 +57,8 @@ import {
   renderRegenerationComparison,
 } from './lib/ui.mjs';
 import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
+import { getCurrentLocale, translate as nativeTranslate } from '../../../i18n.js';
+import { applyTranslations, displayText, initializeI18n, LocalizedError, message as msg, setLanguage, t, translate } from './lib/i18n.mjs';
 
 const EXTENSION_ID = 'silly_memories_plus';
 const EXTENSION_PATH = 'third-party/silly-memories-plus';
@@ -86,6 +88,7 @@ const runtime = {
   contextRefreshTimer: null,
   factsEditorChatId: null,
   factsEditorValue: '',
+  contextUsage: null,
 };
 let settingsInitialized = false;
 
@@ -114,11 +117,12 @@ function debug(...args) {
 }
 
 function setStatus(kind, text) {
+  if (typeof text === 'string') text = msg(text);
   runtime.lastStatus = { kind, text };
   const element = document.getElementById('smp-status');
   if (element) {
     element.dataset.kind = kind;
-    element.textContent = text;
+    element.textContent = displayText(text);
   }
   updateJobControls();
 }
@@ -139,7 +143,7 @@ function updateJobControls() {
 }
 
 function beginMemoryJob(chatId = null) {
-  if (runtime.summarizing) throw new Error('Another memory job is already running');
+  if (runtime.summarizing) throw new LocalizedError(msg('Another memory job is already running'));
   runtime.summarizing = true;
   runtime.cancelRequested = false;
   runtime.abortController = new AbortController();
@@ -169,7 +173,7 @@ function getChatMemory() {
 
 async function setChatMemory(memory, save = true, expectedChatId = null) {
   if (expectedChatId !== null && getCurrentChatId() !== expectedChatId) {
-    throw new Error('Refusing to write memory after chat change');
+    throw new LocalizedError(msg('Refusing to write memory after chat change'));
   }
   const context = getContext();
   if (!Array.isArray(context?.chat) || !context.chat.length) return;
@@ -178,7 +182,7 @@ async function setChatMemory(memory, save = true, expectedChatId = null) {
   if (save) {
     await saveChatConditional();
     if (expectedChatId !== null && getCurrentChatId() !== expectedChatId) {
-      throw new Error('Chat changed while saving memory');
+      throw new LocalizedError(msg('Chat changed while saving memory'));
     }
   }
   renderLibrary();
@@ -193,7 +197,7 @@ function updatePinnedFactsControls() {
   const changed = input.value.trim() !== runtime.factsEditorValue;
   input.disabled = !hasChat || runtime.summarizing;
   button.disabled = !hasChat || runtime.summarizing || !changed;
-  if (state) state.textContent = !hasChat ? 'Open a chat.' : changed ? 'Unsaved' : 'Saved';
+  if (state) state.textContent = translate(!hasChat ? 'Open a chat.' : changed ? 'Unsaved' : 'Saved');
 }
 
 function syncPinnedFactsEditor(reset = false) {
@@ -213,14 +217,14 @@ function syncPinnedFactsEditor(reset = false) {
 async function savePinnedFacts() {
   if (runtime.summarizing) return;
   const chatId = getCurrentChatId();
-  if (chatId == null || chatId !== runtime.factsEditorChatId) throw new Error('Open a chat before saving facts.');
+  if (chatId == null || chatId !== runtime.factsEditorChatId) throw new LocalizedError(msg('Open a chat before saving facts.'));
   const input = document.getElementById('smp-pinned-facts');
   const memory = structuredClone(getChatMemory());
   const facts = input.value.trim();
   if (facts) memory.pinnedFacts = facts;
   else delete memory.pinnedFacts;
   await setChatMemory(memory, true, chatId);
-  setStatus('success', facts ? 'Pinned facts saved for this chat.' : 'Pinned facts cleared.');
+  setStatus('success', facts ? msg('Pinned facts saved for this chat.') : msg('Pinned facts cleared.'));
 }
 
 function fastHash(value) {
@@ -311,7 +315,7 @@ async function repairActiveFrontier(memory) {
       block.sourceFingerprints = [];
     }
   }
-  const message = `Marked ${orphaned.length} non-contiguous active block(s) stale.`;
+  const message = msg`Marked ${orphaned.length} non-contiguous active block(s) stale.`;
   await setChatMemory(memory);
   setStatus('warning', message);
   return memory;
@@ -336,9 +340,9 @@ async function refreshActiveBlockTokenCounts(memory, settings) {
 }
 
 async function requestSummary(prompt, targetTokens, level, stage, instruction = '') {
-  if (runtime.cancelRequested) throw new Error('Compaction cancelled');
+  if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
   if (runtime.activeCompactionChatId !== null && getCurrentChatId() !== runtime.activeCompactionChatId) {
-    throw new Error('Chat changed during compaction');
+    throw new LocalizedError(msg('Chat changed during compaction'));
   }
   const settings = getSettings();
   const countTokens = value => getTokenCountAsync(value, 0);
@@ -367,8 +371,8 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
     if (/<!--\s*oai-proxy-error\s*-->/i.test(rawText) || /^###\s*\*\*Proxy error/im.test(rawText)) {
       const note = rawText.match(/"proxy_note"\s*:\s*"([^"]+)"/i)?.[1]
         || rawText.match(/^\*([^*\r\n]+)\*/m)?.[1]
-        || 'Proxy rejected the summarizer request';
-      throw new Error(`Summarizer provider error: ${note}`);
+        || msg('Proxy rejected the summarizer request');
+      throw new LocalizedError(msg`Summarizer provider error: ${note}`);
     }
 
     let structured;
@@ -376,17 +380,18 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
       structured = parseStructuredSummary(response);
     } catch (error) {
       if (/length|max.?tokens/i.test(finishReason)) {
-        throw new Error(`Summarizer stopped at its output limit (${finishReason}); incomplete block was discarded`, { cause: error });
+        throw new LocalizedError(msg`Summarizer stopped at its output limit (${finishReason}); incomplete block was discarded`, { cause: error });
       }
-      if (/has no narrative/i.test(String(error?.message || ''))) {
-        throw new Error('Summarizer returned an empty structured object; the selected model/provider did not populate the JSON Schema', { cause: error });
+      // Response classification is independent of the displayed error language.
+      if (error.translationKey === 'Summarizer JSON has no narrative') {
+        throw new LocalizedError(msg('Summarizer returned an empty structured object; the selected model/provider did not populate the JSON Schema'), { cause: error });
       }
       throw error;
     }
     const canonicalText = JSON.stringify(structured);
     const outputTokens = await getTokenCountAsync(canonicalText, 0);
     if (outputTokens > usefulOutputTokens) {
-      throw new Error(`Summarizer output exceeded the useful output limit (${outputTokens}/${usefulOutputTokens} tokens)`);
+      throw new LocalizedError(msg`Summarizer output exceeded the useful output limit (${outputTokens}/${usefulOutputTokens} tokens)`);
     }
     return canonicalText;
   };
@@ -439,12 +444,12 @@ async function requestStructuredSummary(prompt, targetTokens, level, stage, labe
   try {
     return parseStructuredSummary(await requestSummary(prompt, targetTokens, level, stage, instruction));
   } catch (error) {
-    throw new Error(`${label} failed strict validation`, { cause: error });
+    throw new LocalizedError(msg`${label} failed strict validation`, { cause: error });
   }
 }
 
 async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, instruction = '') {
-  if (round > 12) throw new Error('Map/reduce did not converge within 12 rounds');
+  if (round > 12) throw new LocalizedError(msg('Map/reduce did not converge within 12 rounds'));
   const { sourceBudget: inputBudget } = await getSummarySourceBudget({
     settings: getSettings(),
     stage: 'rollup',
@@ -463,7 +468,7 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
     return await requestSummary(formatIntermediateSources(groups[0].map(entry => entry.part)), targetTokens, level, 'rollup', instruction);
   }
 
-  setStatus('working', `Recursive reduce round ${round}: ${parts.length} memories in ${groups.length} chunks.`);
+  setStatus('working', msg`Recursive reduce round ${round}: ${parts.length} memories in ${groups.length} chunks.`);
   const intermediateTarget = Math.max(256, Math.min(1500, targetTokens, Math.floor(inputBudget / 4)));
   const next = [];
   for (let index = 0; index < groups.length; index++) {
@@ -472,7 +477,7 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
       intermediateTarget,
       level,
       'rollup',
-      `Reduce summary ${round}.${index + 1}`,
+      msg`Reduce summary ${round}.${index + 1}`,
       instruction,
     ));
   }
@@ -498,14 +503,14 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
     tokens: await countTokens(isRaw ? formatRawSources([unit]) : formatSummarySources([unit])),
   })));
   const groups = chunkByTokenBudget(units, Math.max(512, Math.floor(inputBudget * 0.9)));
-  if (!groups.length) throw new Error('Compaction source is empty');
+  if (!groups.length) throw new LocalizedError(msg('Compaction source is empty'));
 
   let responseText = '';
   if (groups.length === 1) {
     const prompt = isRaw ? formatRawSources(groups[0]) : formatSummarySources(groups[0]);
     responseText = await requestSummary(prompt, targetTokens, level, stage, instruction);
   } else {
-    setStatus('working', `Map/reduce compaction: ${groups.length} source chunks.`);
+    setStatus('working', msg`Map/reduce compaction: ${groups.length} source chunks.`);
     const intermediateTarget = Math.max(512, Math.min(2000, targetTokens));
     const intermediate = [];
     for (let index = 0; index < groups.length; index++) {
@@ -515,7 +520,7 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
         intermediateTarget,
         level,
         stage,
-        `Intermediate summary ${index + 1}`,
+        msg`Intermediate summary ${index + 1}`,
         instruction,
       ));
     }
@@ -570,7 +575,7 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
   }
 
   if (block.summaryTokens > Math.ceil(targetTokens * 1.1)) {
-    throw new Error(`Summary block is too large (${block.summaryTokens}/${targetTokens} tokens)`);
+    throw new LocalizedError(msg`Summary block is too large (${block.summaryTokens}/${targetTokens} tokens)`);
   }
   return block;
 }
@@ -588,7 +593,7 @@ function getBlockRangeMessages(block) {
   });
   const expectedCount = sourceTo - sourceFrom + 1;
   if (!Number.isFinite(sourceFrom) || !Number.isFinite(sourceTo) || sourceTo < sourceFrom || messages.length !== expectedCount) {
-    throw new Error(`Raw source ${sourceFrom}–${sourceTo} is no longer fully available`);
+    throw new LocalizedError(msg`Raw source ${sourceFrom}–${sourceTo} is no longer fully available`);
   }
   return messages;
 }
@@ -632,10 +637,10 @@ function regenerationSourceSnapshot(memory, ids) {
 
 function assertRegenerationCurrent(preview) {
   // A preview replaces only the graph and source snapshot it was generated from.
-  if (getCurrentChatId() !== preview.chatId) throw new Error('Chat changed; generate a new preview.');
-  if (JSON.stringify(getChatMemory()) !== preview.originalMemory) throw new Error('Memory changed; generate a new preview.');
+  if (getCurrentChatId() !== preview.chatId) throw new LocalizedError(msg('Chat changed; generate a new preview.'));
+  if (JSON.stringify(getChatMemory()) !== preview.originalMemory) throw new LocalizedError(msg('Memory changed; generate a new preview.'));
   if (regenerationSourceSnapshot(preview.memory, preview.ids) !== preview.sourceSnapshot) {
-    throw new Error('Source messages changed; generate a new preview.');
+    throw new LocalizedError(msg('Source messages changed; generate a new preview.'));
   }
   for (const id of preview.ids) assertBlockSourceStillCurrent(getBlockById(preview.memory, id), preview.chatId, 'Regeneration preview');
 }
@@ -647,16 +652,18 @@ async function saveRegenerationPreview() {
   runtime.selectedBlockId = preview.blockId;
   closeRegeneration();
   await setChatMemory(preview.memory, true, preview.chatId);
-  setStatus('success', `Saved block replacement${preview.ids.length > 1 ? ` and ${preview.ids.length - 1} dependent merge(s)` : ''}.`);
+  setStatus('success', preview.ids.length > 1
+    ? msg`Saved block replacement and ${preview.ids.length - 1} dependent merge(s).`
+    : msg('Saved block replacement.'));
 }
 
 async function regenerateMemoryBlock(blockId, instruction = '') {
-  if (runtime.summarizing) throw new Error('Another compaction job is already running');
+  if (runtime.summarizing) throw new LocalizedError(msg('Another compaction job is already running'));
   const chatId = getCurrentChatId();
-  if (chatId == null) throw new Error('No active chat');
+  if (chatId == null) throw new LocalizedError(msg('No active chat'));
   const original = getChatMemory();
   const selected = getBlockById(original, blockId);
-  if (!selected) throw new Error('Selected memory block no longer exists');
+  if (!selected) throw new LocalizedError(msg('Selected memory block no longer exists'));
 
   const ids = [selected.id, ...getBlockAncestorIds(original, selected.id)];
   const originalMemory = JSON.stringify(original);
@@ -671,11 +678,11 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
       memory: original,
       blockId: selected.id,
       onStage: ({ block, position, total }) => {
-        if (runtime.cancelRequested) throw new Error('Block regeneration cancelled');
-        if (getCurrentChatId() !== chatId) throw new Error('Chat changed during block regeneration');
+        if (runtime.cancelRequested) throw new LocalizedError(msg('Block regeneration cancelled'));
+        if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed during block regeneration'));
         setStatus(
           'working',
-          `Regenerating L${block.level} block ${position + 1}/${total}${position ? ' (dependent rollup)' : ''}.`,
+          msg`Regenerating L${block.level} block ${position + 1}/${total}${position ? msg(' (dependent rollup)') : ''}.`,
         );
       },
       createReplacement: async (current, candidate) => {
@@ -690,7 +697,7 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
         } else {
           const childBlocks = current.children.map(childId => getBlockById(candidate, childId));
           if (!current.children.length || childBlocks.some(child => !child)) {
-            throw new Error(`L${current.level} block has missing source children`);
+            throw new LocalizedError(msg`L${current.level} block has missing source children`);
           }
           generated = await createBlock({
             level: current.level,
@@ -703,17 +710,17 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
       },
     });
 
-    if (runtime.cancelRequested) throw new Error('Block regeneration cancelled');
-    if (getCurrentChatId() !== chatId) throw new Error('Chat changed before regenerated block commit');
+    if (runtime.cancelRequested) throw new LocalizedError(msg('Block regeneration cancelled'));
+    if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before regenerated block commit'));
     const preview = { memory: result.memory, originalMemory, sourceSnapshot, ids, blockId: selected.id, chatId };
     assertRegenerationCurrent(preview);
     runtime.regenerationPreview = preview;
     const replacement = getBlockById(result.memory, selected.id);
     document.getElementById('smp-regeneration-comparison').innerHTML = renderRegenerationComparison(selected, replacement);
     document.getElementById('smp-regeneration-preview').hidden = false;
-    setStatus('idle', 'Preview ready.');
+    setStatus('idle', msg('Preview ready.'));
   } catch (error) {
-    if (getCurrentChatId() === chatId) setStatus(runtime.cancelRequested ? 'warning' : 'error', String(error?.message || error));
+    if (getCurrentChatId() === chatId) setStatus(runtime.cancelRequested ? 'warning' : 'error', error);
     throw error;
   } finally {
     endMemoryJob();
@@ -723,16 +730,16 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
 async function createManualRollup() {
   if (runtime.summarizing) return;
   const chatId = getCurrentChatId();
-  if (chatId == null) throw new Error('No active chat');
+  if (chatId == null) throw new LocalizedError(msg('No active chat'));
   const memory = getChatMemory();
   const selected = getManualRollupBlocks(memory, [...runtime.manualRollupIds]);
   const sourceLevel = selected[0].level;
   const targetLevel = sourceLevel + 1;
-  if (!confirm(`Merge ${selected.length} selected L${sourceLevel} blocks into one L${targetLevel} block?`)) return;
+  if (!confirm(t`Merge ${selected.length} selected L${sourceLevel} blocks into one L${targetLevel} block?`)) return;
 
   const settings = getSettings();
   beginMemoryJob(chatId);
-  setStatus('working', `Merging ${selected.length} selected L${sourceLevel} blocks into L${targetLevel}.`);
+  setStatus('working', msg`Merging ${selected.length} selected L${sourceLevel} blocks into L${targetLevel}.`);
 
   try {
     const result = await stageManualRollup({
@@ -741,21 +748,21 @@ async function createManualRollup() {
       targetTokens: settings.blockTargetTokens,
       createBlock,
       validateBlock: (block, label) => {
-        if (runtime.cancelRequested) throw new Error('Manual rollup cancelled');
+        if (runtime.cancelRequested) throw new LocalizedError(msg('Manual rollup cancelled'));
         assertBlockSourceStillCurrent(block, chatId, label);
       },
     });
-    if (runtime.cancelRequested) throw new Error('Manual rollup cancelled');
-    if (getCurrentChatId() !== chatId) throw new Error('Chat changed before manual rollup commit');
+    if (runtime.cancelRequested) throw new LocalizedError(msg('Manual rollup cancelled'));
+    if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before manual rollup commit'));
     runtime.manualRollupIds.clear();
     runtime.selectedBlockId = result.rollupBlock.id;
     await setChatMemory(result.memory, true, chatId);
     setStatus(
       'success',
-      `Created L${result.targetLevel} from ${result.childIds.length} selected L${result.sourceLevel} blocks: ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens} tokens.`,
+      msg`Created L${result.targetLevel} from ${result.childIds.length} selected L${result.sourceLevel} blocks: ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens} tokens.`,
     );
   } catch (error) {
-    const message = String(error?.message || error);
+    const message = error;
     setStatus(runtime.cancelRequested ? 'warning' : 'error', message);
     throw error;
   } finally {
@@ -776,7 +783,7 @@ async function toggleBlockRawSource(blockId) {
     runtime.manualRollupIds.delete(block.id);
   }
   await setChatMemory(next);
-  setStatus('success', useRaw ? 'Using original history for this block.' : 'Using summary for this block.');
+  setStatus('success', useRaw ? msg('Using original history for this block.') : msg('Using summary for this block.'));
 }
 
 async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
@@ -787,9 +794,9 @@ async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
   const preview = deleteMemoryBlock(memory, selected.id);
   const dependentCount = preview.removedIds.length - 1;
   const message = dependentCount
-    ? `Delete L${selected.level} block and ${dependentCount} dependent rollup(s)? Raw source will be exposed where coverage becomes discontinuous.`
-    : `Delete selected L${selected.level} block? Its raw source will become visible again.`;
-  if (!confirm(message)) return;
+    ? msg`Delete L${selected.level} block and ${dependentCount} dependent rollup(s)? Raw source will be exposed where coverage becomes discontinuous.`
+    : msg`Delete selected L${selected.level} block? Its raw source will become visible again.`;
+  if (!confirm(displayText(message))) return;
 
   for (const id of preview.reactivatedIds) {
     const block = getBlockById(preview.memory, id);
@@ -808,7 +815,7 @@ async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
   if (runtime.editingBlockId === selected.id) runtime.editingBlockId = null;
   setStatus(
     'success',
-    `Deleted ${preview.removedIds.length} block(s); reactivated ${preview.reactivatedIds.length}, marked stale ${preview.staleIds.length}.`,
+    msg`Deleted ${preview.removedIds.length} block(s); reactivated ${preview.reactivatedIds.length}, marked stale ${preview.staleIds.length}.`,
   );
 }
 
@@ -846,13 +853,13 @@ function openBlockEditor(blockId) {
 
 function readBlockEditor(blockElement) {
   const narrative = blockElement?.querySelector('textarea[data-field="narrative"]');
-  if (!(narrative instanceof HTMLTextAreaElement)) throw new Error('Block editor is unavailable');
+  if (!(narrative instanceof HTMLTextAreaElement)) throw new LocalizedError(msg('Block editor is unavailable'));
   const structured = { narrative: narrative.value.trim() };
   const title = blockElement.querySelector('input[data-field="title"]')?.value.trim();
   if (title) structured.title = title;
   for (const [field] of BLOCK_EDITOR_FIELDS) {
     const textarea = blockElement.querySelector(`textarea[data-field="${field}"]`);
-    if (!(textarea instanceof HTMLTextAreaElement)) throw new Error(`Block editor field ${field} is unavailable`);
+    if (!(textarea instanceof HTMLTextAreaElement)) throw new LocalizedError(msg`Block editor field ${field} is unavailable`);
     structured[field] = textarea.value
       .split(/\r?\n/)
       .map(value => value.trim())
@@ -864,12 +871,12 @@ function readBlockEditor(blockElement) {
 async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
   if (runtime.summarizing) return;
   const chatId = getCurrentChatId();
-  if (chatId == null) throw new Error('No active chat');
+  if (chatId == null) throw new LocalizedError(msg('No active chat'));
   const memory = getChatMemory();
   const block = getBlockById(memory, blockId);
-  if (!block) throw new Error('Selected memory block no longer exists');
+  if (!block) throw new LocalizedError(msg('Selected memory block no longer exists'));
   const dependentCount = getBlockAncestorIds(memory, block.id).length;
-  if (dependentCount && !confirm(`Editing this block will mark ${dependentCount} dependent rollup(s) stale and reactivate their source blocks. Continue?`)) {
+  if (dependentCount && !confirm(t`Editing this block will mark ${dependentCount} dependent rollup(s) stale and reactivate their source blocks. Continue?`)) {
     return;
   }
 
@@ -899,12 +906,12 @@ async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
     }
   }
 
-  if (getCurrentChatId() !== chatId) throw new Error('Chat changed before edited block commit');
+  if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before edited block commit'));
   runtime.editingBlockId = null;
   await setChatMemory(result.memory, true, chatId);
   setStatus(
     'success',
-    `Saved block edit; invalidated ${result.dependentIds.length} rollup(s), reactivated ${result.reactivatedIds.length} source block(s).`,
+    msg`Saved block edit; invalidated ${result.dependentIds.length} rollup(s), reactivated ${result.reactivatedIds.length} source block(s).`,
   );
 }
 
@@ -938,14 +945,14 @@ async function copySelectedBlockJson() {
     document.execCommand('copy');
     textarea.remove();
   }
-  setStatus('success', `Copied L${block.level} block JSON.`);
+  setStatus('success', msg`Copied L${block.level} block JSON.`);
 }
 
 function exportSelectedBlock() {
   const block = getSelectedMemoryBlock();
   if (!block) return;
   downloadJson(block, `silly-memories-plus-${block.id}.json`);
-  setStatus('success', `Exported L${block.level} block.`);
+  setStatus('success', msg`Exported L${block.level} block.`);
 }
 
 function selectMemoryBlock(blockId) {
@@ -968,8 +975,8 @@ function updateBlockActionBar(memory = getChatMemory()) {
   if (!block) runtime.selectedBlockId = null;
   if (label) {
     label.textContent = block
-      ? `Selected: L${block.level} · ${block.sourceFrom}–${block.sourceTo} · ${block.status} · ${block.sourceTokens} → ${block.summaryTokens}t`
-      : 'No block selected.';
+      ? t`Selected: L${block.level} · ${block.sourceFrom}–${block.sourceTo} · ${translate(block.status)} · ${block.sourceTokens} → ${block.summaryTokens}t`
+      : translate('No block selected.');
   }
   const disabled = !block || runtime.summarizing;
   for (const id of ['smp-regenerate-block', 'smp-copy-block', 'smp-export-block']) {
@@ -999,13 +1006,13 @@ function updateManualRollupControls(memory = getChatMemory()) {
       selected = getManualRollupBlocks(memory, [...runtime.manualRollupIds]);
     }
   } catch (selectionError) {
-    error = String(selectionError?.message || selectionError);
+    error = selectionError;
   }
 
   if (label) {
-    if (error) label.textContent = error;
+    if (error) label.textContent = displayText(error);
     else if (selected.length) {
-      label.textContent = `${selected.length} × L${selected[0].level} · source ${selected[0].sourceFrom}–${selected.at(-1).sourceTo} → L${selected[0].level + 1}.`;
+      label.textContent = t`${selected.length} × L${selected[0].level} · source ${selected[0].sourceFrom}–${selected.at(-1).sourceTo} → L${selected[0].level + 1}.`;
     } else if (runtime.manualRollupIds.size === 1) {
       label.textContent = `1 × L${selectedLevel}`;
     } else {
@@ -1015,7 +1022,7 @@ function updateManualRollupControls(memory = getChatMemory()) {
   if (button instanceof HTMLButtonElement) {
     button.disabled = runtime.summarizing || selected.length < 2 || Boolean(error);
     const text = button.querySelector('span');
-    if (text) text.textContent = selectedLevel === null ? 'Merge blocks' : `Merge L${selectedLevel} → L${selectedLevel + 1}`;
+    if (text) text.textContent = selectedLevel === null ? translate('Merge blocks') : t`Merge L${selectedLevel} → L${selectedLevel + 1}`;
   }
   for (const control of document.querySelectorAll('#smp-library [data-smp-rollup-select]')) {
     if (!(control instanceof HTMLButtonElement)) continue;
@@ -1068,14 +1075,14 @@ function applyMemoryToCoreChat(coreChat, memory) {
 }
 
 function assertBlockSourceStillCurrent(block, chatId, label) {
-  if (getCurrentChatId() !== chatId) throw new Error(`Chat changed during ${label}`);
-  if (!fingerprintsStillMatch(block.sourceFingerprints)) throw new Error(`Source changed during ${label}`);
+  if (getCurrentChatId() !== chatId) throw new LocalizedError(msg`Chat changed during ${typeof label === 'string' ? msg(label) : label}`);
+  if (!fingerprintsStillMatch(block.sourceFingerprints)) throw new LocalizedError(msg`Source changed during ${typeof label === 'string' ? msg(label) : label}`);
 }
 
 function assertPinnedFactsCurrent(memory, chatId) {
-  if (chatId !== getCurrentChatId()) throw new Error('Chat changed during context preparation.');
+  if (chatId !== getCurrentChatId()) throw new LocalizedError(msg('Chat changed during context preparation.'));
   if ((memory.pinnedFacts || '') !== (getChatMemory().pinnedFacts || '')) {
-    throw new Error('Pinned facts changed during context preparation. Start generation again.');
+    throw new LocalizedError(msg('Pinned facts changed during context preparation. Start generation again.'));
   }
 }
 
@@ -1091,23 +1098,23 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
       settings,
       createBlock,
       validateBlock: (block, label) => {
-        if (runtime.cancelRequested) throw new Error('Compaction cancelled');
+        if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
         assertBlockSourceStillCurrent(block, chatId, label);
       },
       onStage: ({ kind, plan: stagePlan, level }) => {
-        if (runtime.cancelRequested) throw new Error('Compaction cancelled');
+        if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
         if (kind === 'raw') {
-          setStatus('working', `Compacting ${stagePlan.sourceTokens} raw tokens into ~${stagePlan.targetTokens}.`);
+          setStatus('working', msg`Compacting ${stagePlan.sourceTokens} raw tokens into ~${stagePlan.targetTokens}.`);
         } else {
-          setStatus('working', `Rolling ${stagePlan.blocks.length} memory blocks into L${level}.`);
+          setStatus('working', msg`Rolling ${stagePlan.blocks.length} memory blocks into L${level}.`);
         }
       },
     });
 
-    if (runtime.cancelRequested) throw new Error('Compaction cancelled');
-    if (getCurrentChatId() !== chatId) throw new Error('Chat changed before memory commit');
+    if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
+    if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before memory commit'));
     for (const block of getActiveFrontier(result.memory).blocks) {
-      assertBlockSourceStillCurrent(block, chatId, 'compaction');
+      assertBlockSourceStillCurrent(block, chatId, msg('compaction'));
     }
     assertPinnedFactsCurrent(result.memory, chatId);
     await setChatMemory(result.memory, true, chatId);
@@ -1116,14 +1123,14 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
     if (result.rawBlock && result.rollupBlock) {
       setStatus(
         'success',
-        `Atomic L1+L${result.rollupBlock.level}: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens}t, tier ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens}t.`,
+        msg`Atomic L1+L${result.rollupBlock.level}: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens}t, tier ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens}t.`,
       );
     } else if (result.rawBlock) {
-      setStatus('success', `Created L1 block: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens} tokens.`);
+      setStatus('success', msg`Created L1 block: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens} tokens.`);
     } else if (result.rollupBlock) {
       setStatus(
         'success',
-        `Created L${result.rollupBlock.level} rollup: ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens} tokens.`,
+        msg`Created L${result.rollupBlock.level} rollup: ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens} tokens.`,
       );
     }
     return result.memory;
@@ -1150,7 +1157,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
   try {
     memory = getChatMemory();
     if (settings.enabled && !activeMemoryIsValid(getCurrentComparableChat(), memory)) {
-      await invalidateActiveMemory(memory, 'Memory source changed; active blocks marked stale.');
+      await invalidateActiveMemory(memory, msg('Memory source changed; active blocks marked stale.'));
       memory = getChatMemory();
     }
     if (settings.enabled) {
@@ -1179,7 +1186,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     assertPinnedFactsCurrent(memory, preparedChatId);
   } catch (error) {
     runtime.forceCompaction = false;
-    const message = `Memory preflight failed: ${String(error?.message || error)}`;
+    const message = msg`Memory preflight failed: ${error}`;
     setStatus('error', message);
     console.error(LOG_PREFIX, error);
     abort?.(true);
@@ -1199,11 +1206,11 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     const messages = {
       'below-trigger': 'Nothing to compact at the current trigger.',
       'no-cold-source': 'Nothing to compact while preserving the configured raw tail.',
-      'source-too-small': `Cold source is smaller than the ${plan.effectiveMinimumSourceTokens}-token minimum.`,
+      'source-too-small': msg`Cold source is smaller than the ${plan.effectiveMinimumSourceTokens}-token minimum.`,
       'no-space-for-summary': 'The current conversation fits; there is no space for an additional memory block.',
       'automatic-off': 'Automatic compaction is off.',
     };
-    setStatus('idle', messages[plan.reason] || 'Nothing to compact.');
+    setStatus('idle', messages[plan.reason] || msg('Nothing to compact.'));
   }
 
   if (plan.kind !== 'none') {
@@ -1215,14 +1222,14 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     try {
       memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens);
     } catch (error) {
-      const errorText = String(error?.message || error);
+      const errorText = error;
       if (runtime.cancelRequested) {
-        setStatus('warning', 'Compaction cancelled; previous memory and raw chat remain active.');
+        setStatus('warning', msg('Compaction cancelled; previous memory and raw chat remain active.'));
         abort?.(true);
         return;
       }
       if (getCurrentChatId() !== chatId) {
-        setStatus('warning', `Compaction discarded after chat change: ${errorText}`);
+        setStatus('warning', msg`Compaction discarded after chat change: ${errorText}`);
         abort?.(true);
         return;
       }
@@ -1230,7 +1237,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
 
       memory = getChatMemory();
       if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
-        await invalidateActiveMemory(memory, `Compaction source changed: ${errorText}`);
+        await invalidateActiveMemory(memory, msg`Compaction source changed: ${errorText}`);
         memory = getChatMemory();
       } else {
         setStatus(plan.totalTokens > plan.usableBudget ? 'error' : 'warning', errorText);
@@ -1271,7 +1278,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     }
     applyMemoryToCoreChat(coreChat, memory);
   } catch (error) {
-    const message = `Memory rewrite failed: ${String(error?.message || error)}`;
+    const message = msg`Memory rewrite failed: ${error}`;
     setStatus('error', message);
     console.error(LOG_PREFIX, error);
     abort?.(true);
@@ -1290,10 +1297,11 @@ function describeContextBlock(plan, pinnedTokens) {
   const other = runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0;
   const budget = runtime.contextBudgetsByChat.get(String(getCurrentChatId())) || getMaxPromptTokens();
   const message = describeBlockedPlan({ ...plan, overflowTokens: Math.max(0, plan.totalTokens + other + pinnedTokens - budget) });
-  return pinnedTokens ? `${message} Shorten pinned facts to free context.` : message;
+  return pinnedTokens ? msg`${message} Shorten pinned facts to free context.` : message;
 }
 
 function showContextUsage(usage) {
+  runtime.contextUsage = usage;
   const meter = document.getElementById('smp-context-meter');
   if (!meter) return;
   for (const key of ['used', 'budget', 'memory', 'raw', 'facts', 'other', 'free', 'triggerRemaining']) meter.dataset[key] = String(usage[key]);
@@ -1327,7 +1335,8 @@ async function refreshContextUsage(revision) {
   if (!meter) return;
   const chat = getCurrentComparableChat();
   if (chatId == null || !chat.length) {
-    meter.textContent = 'Open a chat to measure context.';
+    runtime.contextUsage = null;
+    meter.textContent = translate('Open a chat to measure context.');
     for (const key of Object.keys(meter.dataset)) delete meter.dataset[key];
     return;
   }
@@ -1361,7 +1370,7 @@ function updateStats(memory = getChatMemory()) {
   const stats = document.getElementById('smp-stats');
   if (!stats) return;
   const exposedRaw = active.filter(block => block.useRaw).length;
-  stats.textContent = `Active blocks: ${active.length} (${activeTokens}t) · Using original history: ${exposedRaw}`;
+  stats.textContent = t`Active blocks: ${active.length} (${activeTokens}t) · Using original history: ${exposedRaw}`;
 }
 
 function renderLibrary() {
@@ -1386,7 +1395,7 @@ function renderLibrary() {
   if (!blocks.length) {
     runtime.selectedBlockId = null;
     runtime.editingBlockId = null;
-    container.innerHTML = `<div class="smp-empty">${runtime.libraryTab === 'active' ? 'No active memory blocks.' : 'No archived memory blocks.'}</div>`;
+    container.innerHTML = `<div class="smp-empty">${translate(runtime.libraryTab === 'active' ? 'No active memory blocks.' : 'No archived memory blocks.')}</div>`;
     updateBlockActionBar(memory);
     updateManualRollupControls(memory);
     updateStats(memory);
@@ -1489,7 +1498,7 @@ function populateProfiles() {
   const select = document.getElementById('smp-summary-profile');
   if (!(select instanceof HTMLSelectElement)) return;
   const selected = getSettings().summaryProfileId;
-  select.innerHTML = '<option value="">Current main API</option>';
+  select.replaceChildren(new Option(translate('Current main API'), ''));
   try {
     for (const profile of ConnectionManagerRequestService.getSupportedProfiles()) {
       const option = document.createElement('option');
@@ -1516,7 +1525,7 @@ function updateSettingsFields() {
 async function testSummarizerConnection() {
   if (runtime.summarizing) return;
   beginMemoryJob(null);
-  setStatus('working', 'Testing summarizer with synthetic continuity data.');
+  setStatus('working', msg('Testing summarizer with synthetic continuity data.'));
   try {
     const prompt = formatRawSources([
       { message: { index: 0, is_user: true, name: 'Mira', mes: 'Mira gives Rowan the brass observatory key and asks him to guard it until dawn.' } },
@@ -1525,11 +1534,11 @@ async function testSummarizerConnection() {
     const text = await requestSummary(prompt, 512, 1, 'raw');
     const structured = parseStructuredSummary(text);
     const tokens = await getTokenCountAsync(JSON.stringify(structured), 0);
-    setStatus('success', `Summarizer test passed (${tokens}t): ${structured.narrative.slice(0, 140)}`);
+    setStatus('success', msg`Summarizer test passed (${tokens}t): ${structured.narrative.slice(0, 140)}`);
     return structured;
   } catch (error) {
-    const message = String(error?.message || error);
-    setStatus('error', `Summarizer test failed: ${message}`);
+    const message = error;
+    setStatus('error', msg`Summarizer test failed: ${message}`);
     throw error;
   } finally {
     endMemoryJob();
@@ -1540,10 +1549,13 @@ async function renderSettings() {
   if (document.getElementById('smp-settings')) return;
   if (runtime.renderPromise) return runtime.renderPromise;
   runtime.renderPromise = (async () => {
+    await initializeI18n(getCurrentLocale(), nativeTranslate);
+    setLanguage(getSettings().language);
     const container = document.getElementById('extensions_settings2');
     if (!container) return;
     const html = await renderExtensionTemplateAsync(EXTENSION_PATH, 'settings');
     if (!document.getElementById('smp-settings')) container.insertAdjacentHTML('beforeend', html);
+    applyTranslations(document.getElementById('smp-settings'));
 
     bindInput('smp-enabled', 'enabled');
     bindPercentageInputs();
@@ -1555,13 +1567,19 @@ async function renderSettings() {
     bindInput('smp-summary-role', 'summaryRole', String);
     bindInput('smp-structured', 'includeStructuredMemory');
     bindInput('smp-debug', 'debug');
+    const language = document.getElementById('smp-language');
+    language.value = getSettings().language;
+    language.addEventListener('change', () => {
+      updateSettings(draft => { draft.language = language.value; });
+      refreshLanguage();
+    });
     bindPromptInputs();
     populateProfiles();
     document.getElementById('smp-pinned-facts')?.addEventListener('input', updatePinnedFactsControls);
     document.getElementById('smp-save-facts')?.addEventListener('click', () => {
       const chatId = getCurrentChatId();
       void savePinnedFacts().catch(error => {
-        if (getCurrentChatId() === chatId) setStatus('error', String(error?.message || error));
+        if (getCurrentChatId() === chatId) setStatus('error', error);
         console.error(LOG_PREFIX, error);
       });
     });
@@ -1578,7 +1596,7 @@ async function renderSettings() {
     document.getElementById('smp-compact-now')?.addEventListener('click', async () => {
       if (runtime.summarizing) return;
       runtime.forceCompaction = true;
-      setStatus('working', 'Starting forced compaction.');
+      setStatus('working', msg('Starting forced compaction.'));
       try {
         const comparableChat = getCurrentComparableChat();
         await runInterceptor(comparableChat, getMaxPromptTokens(), () => {}, 'manual');
@@ -1593,22 +1611,22 @@ async function renderSettings() {
       runtime.cancelRequested = true;
       runtime.abortController?.abort();
       if (runtime.fallbackSummaryActive) await eventSource.emit(event_types.GENERATION_STOPPED);
-      setStatus('warning', 'Compaction cancellation requested.');
+      setStatus('warning', msg('Compaction cancellation requested.'));
     });
     document.getElementById('smp-clear')?.addEventListener('click', async () => {
-      if (!confirm('Clear summaries and pinned facts for this chat?')) return;
+      if (!confirm(t('Clear summaries and pinned facts for this chat?'))) return;
       runtime.selectedBlockId = null;
       runtime.manualRollupIds.clear();
       closeBlockEditor();
       await setChatMemory(createEmptyMemory());
       syncPinnedFactsEditor(true);
-      setStatus('idle', 'Current chat memory cleared.');
+      setStatus('idle', msg('Current chat memory cleared.'));
     });
     document.getElementById('smp-reset-prompts')?.addEventListener('click', () => {
-      if (!confirm('Restore all three built-in summary prompts?')) return;
+      if (!confirm(t('Restore all three built-in summary prompts?'))) return;
       updateSettings(draft => { draft.prompts = { ...DEFAULT_PROMPTS }; });
       updatePromptFields();
-      setStatus('success', 'Default summary prompts restored.');
+      setStatus('success', msg('Default summary prompts restored.'));
     });
     document.getElementById('smp-library')?.addEventListener('click', event => {
       const rollupControl = event.target instanceof Element ? event.target.closest('[data-smp-rollup-select]') : null;
@@ -1634,19 +1652,19 @@ async function renderSettings() {
         if (actionName === 'cancel-edit') closeBlockEditor(blockId);
         if (actionName === 'save-edit') {
           void saveSelectedBlockEdit(blockId).catch(error => {
-            setStatus('error', String(error?.message || error));
+            setStatus('error', error);
             console.error(LOG_PREFIX, error);
           });
         }
         if (actionName === 'delete') {
           void deleteSelectedMemoryBlock(blockId).catch(error => {
-            setStatus('error', String(error?.message || error));
+            setStatus('error', error);
             console.error(LOG_PREFIX, error);
           });
         }
         if (actionName === 'toggle-raw') {
           void toggleBlockRawSource(blockId).catch(error => {
-            setStatus('error', String(error?.message || error));
+            setStatus('error', error);
             console.error(LOG_PREFIX, error);
           });
         }
@@ -1669,15 +1687,15 @@ async function renderSettings() {
       if (!runtime.regenerationBlockId || runtime.summarizing) return;
       const instruction = document.getElementById('smp-regeneration-wish').value.trim();
       void regenerateMemoryBlock(runtime.regenerationBlockId, instruction).catch(error => {
-        const message = String(error?.message || error);
-        if (runtime.regenerationBlockId && runtime.lastStatus.text !== message) setStatus('error', message);
+        const message = error;
+        if (runtime.regenerationBlockId && displayText(runtime.lastStatus.text) !== displayText(message)) setStatus('error', message);
         console.error(LOG_PREFIX, error);
       });
     });
     document.getElementById('smp-save-preview')?.addEventListener('click', () => {
       void saveRegenerationPreview().catch(error => {
         runtime.regenerationPreview = null;
-        setStatus('error', String(error?.message || error));
+        setStatus('error', error);
         console.error(LOG_PREFIX, error);
       });
     });
@@ -1685,7 +1703,7 @@ async function renderSettings() {
       document.getElementById(id)?.addEventListener('click', () => {
         if (runtime.summarizing) return;
         closeRegeneration();
-        setStatus('idle', 'Ready.');
+        setStatus('idle', msg('Ready.'));
       });
     }
     const selectLibraryTab = tab => {
@@ -1710,7 +1728,7 @@ async function renderSettings() {
     }
     document.getElementById('smp-copy-block')?.addEventListener('click', () => {
       void copySelectedBlockJson().catch(error => {
-        setStatus('error', String(error?.message || error));
+        setStatus('error', error);
         console.error(LOG_PREFIX, error);
       });
     });
@@ -1732,6 +1750,32 @@ function exportCurrentMemory() {
   downloadJson(getChatMemory(), `silly-memories-plus-${chatId}.json`);
 }
 
+function refreshLanguage() {
+  setLanguage(getSettings().language);
+  const root = document.getElementById('smp-settings');
+  // Rebuild translated chrome while preserving open cards and unsaved editor values.
+  const openIds = new Set([...root.querySelectorAll('.smp-block[open]')].map(card => card.dataset.blockId));
+  const drafts = [...root.querySelectorAll('.smp-inline-editor:not([hidden]) [data-field]')]
+    .map(input => ({ field: input.dataset.field, value: input.value }));
+  applyTranslations(root);
+  populateProfiles();
+  renderLibrary();
+  for (const card of root.querySelectorAll('.smp-block')) card.open = openIds.has(card.dataset.blockId);
+  for (const draft of drafts) {
+    const input = root.querySelector(`.smp-inline-editor:not([hidden]) [data-field="${draft.field}"]`);
+    if (input) input.value = draft.value;
+  }
+  const preview = runtime.regenerationPreview;
+  if (preview) {
+    document.getElementById('smp-regeneration-comparison').innerHTML = renderRegenerationComparison(
+      getBlockById(getChatMemory(), preview.blockId), getBlockById(preview.memory, preview.blockId),
+    );
+  }
+  if (runtime.contextUsage) showContextUsage(runtime.contextUsage);
+  else document.getElementById('smp-context-meter').textContent = translate('Open a chat to measure context.');
+  setStatus(runtime.lastStatus.kind, runtime.lastStatus.text);
+}
+
 function onChatChanged() {
   if (runtime.summarizing) {
     runtime.abortController?.abort();
@@ -1740,7 +1784,8 @@ function onChatChanged() {
   ++runtime.contextRevision;
   const meter = document.getElementById('smp-context-meter');
   if (meter) {
-    meter.textContent = 'Measuring context…';
+    runtime.contextUsage = null;
+    meter.textContent = translate('Measuring context…');
     for (const key of Object.keys(meter.dataset)) delete meter.dataset[key];
   }
   syncPinnedFactsEditor(true);
@@ -1752,7 +1797,7 @@ function onChatChanged() {
   runtime.manualRollupIds.clear();
   closeBlockEditor();
   renderLibrary();
-  setStatus('idle', 'Ready for this chat.');
+  setStatus('idle', msg('Ready for this chat.'));
 }
 
 function captureChatCompletionOverhead() {
@@ -1796,9 +1841,9 @@ async function validateAfterChatMutation(label) {
   const memory = getChatMemory();
   if (!getActiveBlocks(memory).length) return;
   if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
-    await invalidateActiveMemory(memory, `${label}; active memory marked stale.`);
+    await invalidateActiveMemory(memory, msg`${label}; active memory marked stale.`);
   } else {
-    setStatus('idle', `${label}; active memory remains valid.`);
+    setStatus('idle', msg`${label}; active memory remains valid.`);
   }
 }
 
@@ -1812,10 +1857,10 @@ eventSource.on(event_types.GENERATE_AFTER_COMBINE_PROMPTS, captureTextCompletion
 eventSource.on(event_types.PRESET_CHANGED, clearCurrentOverheadEstimate);
 eventSource.on(event_types.OAI_PRESET_CHANGED_AFTER, clearCurrentOverheadEstimate);
 eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, clearCurrentOverheadEstimate);
-eventSource.on(event_types.MESSAGE_EDITED, () => void validateAfterChatMutation('Message edited'));
-eventSource.on(event_types.MESSAGE_UPDATED, () => void validateAfterChatMutation('Message updated'));
-eventSource.on(event_types.MESSAGE_SWIPED, () => void validateAfterChatMutation('Swipe changed'));
-eventSource.on(event_types.MESSAGE_DELETED, () => void validateAfterChatMutation('Message deleted'));
+eventSource.on(event_types.MESSAGE_EDITED, () => void validateAfterChatMutation(msg('Message edited')));
+eventSource.on(event_types.MESSAGE_UPDATED, () => void validateAfterChatMutation(msg('Message updated')));
+eventSource.on(event_types.MESSAGE_SWIPED, () => void validateAfterChatMutation(msg('Swipe changed')));
+eventSource.on(event_types.MESSAGE_DELETED, () => void validateAfterChatMutation(msg('Message deleted')));
 eventSource.on(event_types.MESSAGE_SENT, scheduleContextRefresh);
 eventSource.on(event_types.MESSAGE_RECEIVED, scheduleContextRefresh);
 

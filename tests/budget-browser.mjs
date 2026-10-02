@@ -38,6 +38,7 @@ try {
   await page.goto(process.env.SMP_BASE_URL || 'http://127.0.0.1:8000', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => typeof globalThis.sillyMemoriesPlusGenerateInterceptor === 'function');
   await page.waitForSelector('#smp-settings', { state: 'attached' });
+  await page.locator('#preloader').waitFor({ state: 'hidden' });
   for (const scenario of cases) {
     const result = await page.evaluate(async scenario => {
       const context = globalThis.SillyTavern.getContext();
