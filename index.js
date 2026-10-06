@@ -44,7 +44,7 @@ import {
 } from './lib/core.mjs';
 import {
   assertSummaryRequestFits,
-  formatIntermediateSources,
+  chunkStructuredSources,
   formatRawSources,
   formatSummarySources,
   getSummarySourceBudget,
@@ -366,6 +366,11 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
     || response?.stop_reason
     || '',
   );
+  const extractSummary = (response, api) => {
+    const tool = Array.isArray(response?.content)
+      ? response.content.find(part => part.type === 'tool_use' && part.name === SUMMARY_JSON_SCHEMA.name) : null;
+    return tool ? tool.input : extractMessageFromData(response, api);
+  };
   const validateResponse = async (response, finishReason = '') => {
     const rawText = typeof response === 'string' ? response.trim() : '';
     if (/<!--\s*oai-proxy-error\s*-->/i.test(rawText) || /^###\s*\*\*Proxy error/im.test(rawText)) {
@@ -416,7 +421,7 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
         json_schema: SUMMARY_JSON_SCHEMA,
       },
     );
-    return await validateResponse(extractMessageFromData(response, apiMap.selected), getFinishReason(response));
+    return await validateResponse(extractSummary(response, apiMap.selected), getFinishReason(response));
   }
 
   runtime.fallbackSummaryActive = true;
@@ -433,7 +438,7 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
       systemPrompt,
       responseLength: requestMaxTokens,
     });
-    return await validateResponse(extractMessageFromData(response), getFinishReason(response));
+    return await validateResponse(extractSummary(response), getFinishReason(response));
   } finally {
     eventSource.removeListener(event_types.CHAT_COMPLETION_SETTINGS_READY, overrideFallbackPayload);
     runtime.fallbackSummaryActive = false;
@@ -444,7 +449,7 @@ async function requestStructuredSummary(prompt, targetTokens, level, stage, labe
   try {
     return parseStructuredSummary(await requestSummary(prompt, targetTokens, level, stage, instruction));
   } catch (error) {
-    throw new LocalizedError(msg`${label} failed strict validation`, { cause: error });
+    throw new LocalizedError(msg`${label}: ${error}`, { cause: error });
   }
 }
 
@@ -458,14 +463,11 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
     instruction,
     countTokens: value => getTokenCountAsync(value, 0),
   });
-  const entries = await Promise.all(parts.map(async part => {
-    const text = JSON.stringify(part);
-    return { part, tokens: await getTokenCountAsync(text, 0) };
-  }));
-  const groups = chunkByTokenBudget(entries, Math.max(512, Math.floor(inputBudget * 0.9)));
+  const groups = await chunkStructuredSources(parts.map((structured, index) => ({ index: index + 1, structured })),
+    Math.floor(inputBudget * 0.9), value => getTokenCountAsync(value, 0));
 
   if (groups.length === 1) {
-    return await requestSummary(formatIntermediateSources(groups[0].map(entry => entry.part)), targetTokens, level, 'rollup', instruction);
+    return await requestSummary(groups[0], targetTokens, level, 'rollup', instruction);
   }
 
   setStatus('working', msg`Recursive reduce round ${round}: ${parts.length} memories in ${groups.length} chunks.`);
@@ -473,7 +475,7 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
   const next = [];
   for (let index = 0; index < groups.length; index++) {
     next.push(await requestStructuredSummary(
-      formatIntermediateSources(groups[index].map(entry => entry.part)),
+      groups[index],
       intermediateTarget,
       level,
       'rollup',
@@ -481,12 +483,18 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
       instruction,
     ));
   }
-  return await reduceStructuredSummaries(next, targetTokens, level + 1, round + 1, instruction);
+  return await reduceStructuredSummaries(next, targetTokens, level, round + 1, instruction);
 }
 
 async function createBlock({ level, sourceEntries = [], childBlocks = [], targetTokens, instruction = '' }) {
   const isRaw = level === 1;
   const settings = getSettings();
+  const currentChat = isRaw ? getCurrentComparableChat() : [];
+  const fingerprints = isRaw
+    ? sourceEntries.map(entry => fingerprintMessage(findCurrentMessage(currentChat, {
+      index: entry.index, id: getMessageIdentity(entry.message),
+    }) || entry.message))
+    : childBlocks.flatMap(block => block.sourceFingerprints || []);
   const stage = isRaw ? 'raw' : 'rollup';
   const countTokens = value => getTokenCountAsync(value, 0);
   const { sourceBudget: inputBudget } = await getSummarySourceBudget({
@@ -497,26 +505,29 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
     instruction,
     countTokens,
   });
-  const sourceUnits = isRaw ? await splitOversizedRawEntries(sourceEntries, inputBudget, countTokens) : childBlocks;
-  const units = await Promise.all(sourceUnits.map(async unit => ({
-    ...unit,
-    tokens: await countTokens(isRaw ? formatRawSources([unit]) : formatSummarySources([unit])),
-  })));
-  const groups = chunkByTokenBudget(units, Math.max(512, Math.floor(inputBudget * 0.9)));
+  let groups;
+  if (isRaw) {
+    const sourceUnits = await splitOversizedRawEntries(sourceEntries, inputBudget, countTokens);
+    const units = await Promise.all(sourceUnits.map(async unit => ({ ...unit, tokens: await countTokens(formatRawSources([unit])) })));
+    groups = chunkByTokenBudget(units, Math.floor(inputBudget * 0.9)).map(formatRawSources);
+  } else {
+    const prompt = formatSummarySources(childBlocks);
+    groups = await countTokens(prompt) <= Math.floor(inputBudget * 0.9) ? [prompt]
+      : await chunkStructuredSources(childBlocks.map(block => ({ level: block.level,
+        source: [block.sourceFrom, block.sourceTo], structured: block.structured })), Math.floor(inputBudget * 0.9), countTokens);
+  }
   if (!groups.length) throw new LocalizedError(msg('Compaction source is empty'));
 
   let responseText = '';
   if (groups.length === 1) {
-    const prompt = isRaw ? formatRawSources(groups[0]) : formatSummarySources(groups[0]);
-    responseText = await requestSummary(prompt, targetTokens, level, stage, instruction);
+    responseText = await requestSummary(groups[0], targetTokens, level, stage, instruction);
   } else {
     setStatus('working', msg`Map/reduce compaction: ${groups.length} source chunks.`);
     const intermediateTarget = Math.max(512, Math.min(2000, targetTokens));
     const intermediate = [];
     for (let index = 0; index < groups.length; index++) {
-      const prompt = isRaw ? formatRawSources(groups[index]) : formatSummarySources(groups[index]);
       intermediate.push(await requestStructuredSummary(
-        prompt,
+        groups[index],
         intermediateTarget,
         level,
         stage,
@@ -524,21 +535,10 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
         instruction,
       ));
     }
-    responseText = await reduceStructuredSummaries(intermediate, targetTokens, level + 1, 1, instruction);
+    responseText = await reduceStructuredSummaries(intermediate, targetTokens, level, 1, instruction);
   }
-  let structured = parseStructuredSummary(responseText);
+  const structured = parseStructuredSummary(responseText);
 
-  const currentChat = isRaw ? getCurrentComparableChat() : [];
-  const fingerprints = isRaw
-    ? sourceEntries.map(entry => {
-      const sourceIdentity = {
-        index: entry.index,
-        id: getMessageIdentity(entry.message),
-      };
-      const currentMessage = findCurrentMessage(currentChat, sourceIdentity) || entry.message;
-      return fingerprintMessage(currentMessage);
-    })
-    : childBlocks.flatMap(block => block.sourceFingerprints || []);
   const sourceFrom = isRaw
     ? sourceEntries[0].index
     : Math.min(...childBlocks.map(block => block.sourceFrom));
@@ -568,14 +568,16 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
 
   block.summaryTokens = await getTokenCountAsync(renderBlockText(block, settings.includeStructuredMemory), 0);
   if (block.summaryTokens > targetTokens) {
-    const reducedText = await requestSummary(JSON.stringify(structured), targetTokens, level, 'reduce', instruction);
-    structured = parseStructuredSummary(reducedText);
-    block = { ...block, structured };
-    block.summaryTokens = await getTokenCountAsync(renderBlockText(block, settings.includeStructuredMemory), 0);
-  }
-
-  if (block.summaryTokens > Math.ceil(targetTokens * 1.1)) {
-    throw new LocalizedError(msg`Summary block is too large (${block.summaryTokens}/${targetTokens} tokens)`);
+    try {
+      const reducedText = await requestSummary(JSON.stringify(structured), targetTokens, level, 'reduce', instruction);
+      const reduced = { ...block, structured: parseStructuredSummary(reducedText) };
+      reduced.summaryTokens = await getTokenCountAsync(renderBlockText(reduced, settings.includeStructuredMemory), 0);
+      if (reduced.summaryTokens < block.summaryTokens) block = reduced;
+    } catch (error) {
+      if (runtime.cancelRequested || runtime.abortController?.signal.aborted || (runtime.activeCompactionChatId !== null && getCurrentChatId() !== runtime.activeCompactionChatId)) throw error;
+      // A failed optional reduction cannot invalidate a complete checked answer.
+      debug('Keeping complete summary after reduction failure', error);
+    }
   }
   return block;
 }
@@ -1086,7 +1088,7 @@ function assertPinnedFactsCurrent(memory, chatId) {
   }
 }
 
-async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens) {
+async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints) {
   runtime.abortController = new AbortController();
   runtime.activeCompactionChatId = chatId;
   try {
@@ -1109,6 +1111,13 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
           setStatus('working', msg`Rolling ${stagePlan.blocks.length} memory blocks into L${level}.`);
         }
       },
+      onCheckpoint: async candidate => {
+        if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
+        if (!fingerprintsStillMatch(preparedFingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
+        for (const block of getActiveFrontier(candidate).blocks) assertBlockSourceStillCurrent(block, chatId, msg('compaction'));
+        assertPinnedFactsCurrent(candidate, chatId);
+        await setChatMemory(candidate, true, chatId);
+      },
     });
 
     if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
@@ -1117,13 +1126,12 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
       assertBlockSourceStillCurrent(block, chatId, msg('compaction'));
     }
     assertPinnedFactsCurrent(result.memory, chatId);
-    await setChatMemory(result.memory, true, chatId);
     updateContextFromPlan(result.finalPlan, contextSize, pinnedTokens);
     updateStats(result.memory);
     if (result.rawBlock && result.rollupBlock) {
       setStatus(
         'success',
-        msg`Atomic L1+L${result.rollupBlock.level}: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens}t, tier ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens}t.`,
+        msg`Saved L1 and L${result.rollupBlock.level}: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens}t, tier ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens}t.`,
       );
     } else if (result.rawBlock) {
       setStatus('success', msg`Created L1 block: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens} tokens.`);
@@ -1150,6 +1158,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
   runtime.contextBudgetsByChat.set(String(getCurrentChatId()), contextSize);
   ++runtime.contextRevision;
   const preparedChatId = getCurrentChatId();
+  const preparedFingerprints = getCurrentComparableChat().map(fingerprintMessage);
 
   let memory;
   let plan;
@@ -1220,16 +1229,21 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     updateManualRollupControls();
     const chatId = getCurrentChatId();
     try {
-      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens);
+      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints);
     } catch (error) {
       const errorText = error;
       if (runtime.cancelRequested) {
-        setStatus('warning', msg('Compaction cancelled; previous memory and raw chat remain active.'));
+        setStatus('warning', msg('Compaction cancelled.'));
         abort?.(true);
         return;
       }
       if (getCurrentChatId() !== chatId) {
         setStatus('warning', msg`Compaction discarded after chat change: ${errorText}`);
+        abort?.(true);
+        return;
+      }
+      if (!fingerprintsStillMatch(preparedFingerprints)) {
+        setStatus('warning', msg('Source messages changed during compaction. Start generation again.'));
         abort?.(true);
         return;
       }
@@ -1240,12 +1254,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
         await invalidateActiveMemory(memory, msg`Compaction source changed: ${errorText}`);
         memory = getChatMemory();
       } else {
-        setStatus(plan.totalTokens > plan.usableBudget ? 'error' : 'warning', errorText);
-      }
-      // A failed compaction cannot send an already oversized context onward.
-      if (plan.totalTokens > plan.usableBudget) {
-        abort?.(true);
-        return;
+        setStatus('warning', errorText);
       }
     } finally {
       runtime.summarizing = false;
@@ -1264,6 +1273,7 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     const facts = renderPinnedFacts(memory.pinnedFacts);
     pinnedTokens = facts ? await getTokenCountAsync(facts, 0) : 0;
     assertPinnedFactsCurrent(memory, preparedChatId);
+    if (!fingerprintsStillMatch(preparedFingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     const fixedTokens = (runtime.fixedPromptTokensByChat.get(String(getCurrentChatId())) || 0) + pinnedTokens;
     const currentPlan = buildCompactionPlan({
       contextBudget: contextSize, fixedPromptTokens: fixedTokens,
@@ -1272,7 +1282,10 @@ async function runInterceptor(coreChat, contextSize, abort, type) {
     updateContextFromPlan(currentPlan, contextSize, pinnedTokens);
     updateStats(memory);
     if (currentPlan.totalTokens > currentPlan.usableBudget) {
-      setStatus('error', describeContextBlock({ ...currentPlan, overflowTokens: currentPlan.totalTokens - currentPlan.usableBudget }, pinnedTokens));
+      const overflowTokens = currentPlan.totalTokens - currentPlan.usableBudget;
+      setStatus('error', currentPlan.kind !== 'blocked' && runtime.lastStatus.kind === 'warning'
+        ? msg`Context exceeds the budget by ${overflowTokens} tokens. ${runtime.lastStatus.text}`
+        : describeContextBlock({ ...currentPlan, overflowTokens }, pinnedTokens));
       abort?.(true);
       return;
     }

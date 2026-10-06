@@ -82,6 +82,8 @@ You can choose a separate Connection Manager profile for memory. Your main model
 | Injected memory role | Whether memory is sent as a system, user, or assistant message. |
 | Inject structured ledger with narrative | Include relationship, item, and other detail notes alongside the event summary. |
 
+The target sets the desired size; a complete summary can exceed it. The extension checks actual context usage before sending the chat request. In multi-stage compaction, each completed block is saved separately. If the next task fails, the next attempt starts from the saved memory.
+
 If context is over budget, switch some blocks back to summary mode, shorten pinned facts, or increase the context window in SillyTavern.
 
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Runtime and maintenance → Interface language**.

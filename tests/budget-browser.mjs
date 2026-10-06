@@ -140,7 +140,8 @@ try {
       assert.ok(result.outgoingTokens <= scenario.budget, `${scenario.name}: final context exceeds budget`);
       assert.ok(result.tailPreserved, `${scenario.name}: newest messages changed`);
     }
-    if (scenario.blocked || scenario.fail || scenario.failAt) assert.ok(result.memoryUnchanged, `${scenario.name}: failed transaction committed`);
+    if (scenario.failAt) assert.ok(!result.memoryUnchanged, `${scenario.name}: completed compaction stage was lost`);
+    else if (scenario.blocked || scenario.fail) assert.ok(result.memoryUnchanged, `${scenario.name}: failed stage committed`);
     if (scenario.name === 'early-merge') assert.ok(result.active.some(block => block.level === 2));
     if (scenario.name === 'scaled-l1') assert.ok(result.active.some(block => block.level === 1));
     if (scenario.name === 'l1-and-rollup') assert.ok(result.active.length === 1 && result.active[0].level === 2);
