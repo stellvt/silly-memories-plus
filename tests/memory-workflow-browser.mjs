@@ -24,6 +24,7 @@ try {
   await page.locator('#preloader').waitFor({ state: 'hidden' });
   await page.evaluate(async () => {
     const script = await import('/script.js');
+    script.changeMainAPI('kobold');
     const core = await import('/scripts/extensions/third-party/silly-memories-plus/lib/core.mjs');
     const { ConnectionManagerRequestService: service } = await import('/scripts/extensions/shared.js');
     const { Popup } = await import('/scripts/popup.js');

@@ -37,6 +37,10 @@ try {
     const { Popup } = await import('/scripts/popup.js');
     for (const popup of [...Popup.util.popups]) if (popup.dlg.open) await popup.complete(1);
     const context = SillyTavern.getContext();
+    script.changeMainAPI('openai');
+    const { oai_settings } = await import('/scripts/openai.js');
+    oai_settings.chat_completion_source = 'openai';
+    oai_settings.openai_model = 'gpt-4o-mini';
     context.characters.push({ name: 'Pinned test', avatar: 'none', chat: 'pins-a', data: {} });
     script.setCharacterId(context.characters.length - 1);
     const structured = narrative => ({ narrative, relationships: [], importantItems: [], characterStates: [], locations: [], commitments: [], openThreads: [], resolvedThreads: [], worldFacts: [], exactTerms: [] });
@@ -120,12 +124,18 @@ try {
     await sillyMemoriesPlusGenerateInterceptor(outgoing, 40000, () => {}, 'normal');
     return outgoing.filter(x => x.extra?.sillyMemoriesPlusPinnedFacts).length === 1;
   }));
-  await page.evaluate(async () => {
+  const measuredOther = await page.evaluate(async () => {
     pinsTest.promptManager.tokenHandler.counts = { chatHistory: 321, main: 600 };
-    await pinsTest.script.eventSource.emit(pinsTest.script.event_types.CHAT_COMPLETION_PROMPT_READY);
+    const outgoing = pinsTest.context.chat.map((message, index) => ({ ...message, index }));
+    await sillyMemoriesPlusGenerateInterceptor(outgoing, 40000, () => {}, 'normal');
+    await pinsTest.script.eventSource.emit(pinsTest.script.event_types.CHAT_COMPLETION_PROMPT_READY, { chat: [
+      { role: 'system', content: ' preset'.repeat(600) },
+      ...outgoing.map(message => ({ role: message.extra?.type ? 'system' : message.is_user ? 'user' : 'assistant', content: message.mes })),
+    ], dryRun: false });
+    return Number(document.getElementById('smp-context-meter').dataset.other);
   });
   const measured = await generate();
-  await check('other-prompt-counted-without-double-facts', measured.meter.other === 600 && measured.meter.facts === first.meter.facts);
+  await check('other-prompt-counted-without-double-facts', measuredOther > 0 && measured.meter.other === measuredOther && measured.meter.facts === first.meter.facts);
   await check('measured-context-has-no-estimate-caption', await page.evaluate(() => !document.querySelector('.smp-context').textContent.includes('Estimate')));
   await page.evaluate(async () => { await pinsTest.script.eventSource.emit(pinsTest.script.event_types.OAI_PRESET_CHANGED_AFTER); });
   await page.waitForFunction(() => document.querySelector('.smp-context-legend').textContent.includes('Other prompt: —'));
@@ -139,8 +149,8 @@ try {
   await download.saveAs(exportPath);
   const { readFile } = await import('node:fs/promises');
   await check('export-includes-facts', JSON.parse(await readFile(exportPath, 'utf8')).pinnedFacts === facts);
-  await reset({ raw: [3000, 7000, 7000], facts: ' pinned'.repeat(6000) });
-  const compressed = await generate(30000);
+  await reset({ raw: [9000, 7000, 7000], facts: ' pinned'.repeat(6000) });
+  const compressed = await generate(36000);
   await check('facts-create-real-compaction-pressure', !compressed.aborted && await page.evaluate(() => pinsTest.calls.length > 0 && pinsTest.context.chatMetadata.silly_memories_plus.blocks.length > 0));
   await check('facts-survive-compaction-and-are-not-summary-source', compressed.facts === ' pinned'.repeat(6000).trim() && await page.evaluate(() => pinsTest.calls.every(call => !call.messages[1].content.includes('pinned'))));
   const blockId = await page.evaluate(() => pinsTest.context.chatMetadata.silly_memories_plus.blocks.find(x => x.status === 'active').id);
@@ -159,9 +169,9 @@ try {
   await reset({ facts, enabled: false });
   const disabled = await generate();
   await check('facts-work-with-auto-compaction-off', !disabled.aborted && disabled.outgoing.some(x => x.extra?.sillyMemoriesPlusPinnedFacts) && await page.evaluate(() => pinsTest.calls.length === 0));
-  await reset({ raw: [3000, 7000, 7000], facts: ' pinned'.repeat(6000) });
+  await reset({ raw: [9000, 7000, 7000], facts: ' pinned'.repeat(6000) });
   await page.evaluate(() => { pinsTest.mode = 'wait'; });
-  const racingGeneration = generate(30000);
+  const racingGeneration = generate(36000);
   await page.waitForFunction(() => Boolean(pinsTest.pending));
   await page.evaluate(() => {
     pinsTest.context.chatMetadata.silly_memories_plus.pinnedFacts = 'Updated facts during compaction.';
@@ -230,17 +240,23 @@ try {
   await page.evaluate(() => { document.getElementById('smp-settings').style.width = '430px'; });
   await openSection('facts');
   await page.evaluate(() => globalThis.toastr?.clear());
-  await page.locator('#toast-container .toast').waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => !document.querySelector('#toast-container .toast'));
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'pinned-facts-and-context.png') });
   const largeBlocks = blocks.map(block => ({ ...block, structured: { ...block.structured, narrative: ' memory'.repeat(6000) } }));
   await reset({ raw: [100, 100, 3000, 3000], facts, blocks: largeBlocks });
   await generate();
-  await page.evaluate(async () => {
+  const breakdownOther = await page.evaluate(async () => {
     pinsTest.promptManager.tokenHandler.counts = { chatHistory: 19000, main: 6000 };
-    await pinsTest.script.eventSource.emit(pinsTest.script.event_types.CHAT_COMPLETION_PROMPT_READY);
+    const outgoing = pinsTest.context.chat.map((message, index) => ({ ...message, index }));
+    await sillyMemoriesPlusGenerateInterceptor(outgoing, 40000, () => {}, 'normal');
+    await pinsTest.script.eventSource.emit(pinsTest.script.event_types.CHAT_COMPLETION_PROMPT_READY, { chat: [
+      { role: 'system', content: ' preset'.repeat(6000) },
+      ...outgoing.map(message => ({ role: message.extra?.type ? 'system' : message.is_user ? 'user' : 'assistant', content: message.mes })),
+    ], dryRun: false });
+    return Number(document.getElementById('smp-context-meter').dataset.other);
   });
   const breakdown = await generate();
-  await check('measured-context-breakdown', breakdown.meter.memory > 12000 && breakdown.meter.raw > 6000 && breakdown.meter.other === 6000 && breakdown.meter.used < 40000);
+  await check('measured-context-breakdown', breakdown.meter.memory > 12000 && breakdown.meter.raw > 6000 && breakdownOther >= 6000 && breakdown.meter.other === breakdownOther && breakdown.meter.used < 40000);
   await openSection('facts');
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'context-breakdown.png') });
 } catch (error) {

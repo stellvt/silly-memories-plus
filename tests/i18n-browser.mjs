@@ -122,7 +122,7 @@ try {
   await check('russian-320px-no-overflow', () => page.evaluate(() => { const root = document.getElementById('smp-settings'); return root.scrollWidth <= root.clientWidth + 1; }));
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'russian-ui.png') });
   await page.evaluate(() => { document.getElementById('smp-settings').style.width = '430px'; });
-  await page.locator('[data-section="runtime"] > summary').click();
+  await page.locator('[data-section="debug"] > summary').click();
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'language-control.png') });
   await page.waitForTimeout(1500);
   await page.reload();

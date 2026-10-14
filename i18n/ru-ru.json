@@ -237,5 +237,9 @@
   "smp.Proxy rejected the summarizer request": "Прокси отклонил запрос суммаризатора",
   "smp.Reduce summary ${0}.${1}": "Сжатие саммари ${0}.${1}",
   "smp.Intermediate summary ${0}": "Промежуточное саммари ${0}",
-  "smp.Memory blocks": "Блоки памяти"
+  "smp.Memory blocks": "Блоки памяти",
+  "smp.Download logs": "Скачать логи",
+  "smp.Debug": "Отладка",
+  "smp.Memory changed during context preparation. Start generation again.": "Память изменилась во время подготовки контекста. Запустите генерацию снова.",
+  "smp.Memory or recent history is missing from the prompt. Check the chat history marker and prompt settings.": "В запросе отсутствует память или свежая история. Проверьте маркер истории чата и настройки промптов."
 }

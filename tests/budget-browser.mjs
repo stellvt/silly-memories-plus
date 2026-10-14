@@ -39,6 +39,12 @@ try {
   await page.waitForFunction(() => typeof globalThis.sillyMemoriesPlusGenerateInterceptor === 'function');
   await page.waitForSelector('#smp-settings', { state: 'attached' });
   await page.locator('#preloader').waitFor({ state: 'hidden' });
+  await page.evaluate(async () => {
+    const script = await import('/script.js');
+    script.changeMainAPI('kobold');
+    const { getTokenCountAsync } = await import('/scripts/tokenizers.js');
+    await getTokenCountAsync(' memory'.repeat(100), 0);
+  });
   for (const scenario of cases) {
     const result = await page.evaluate(async scenario => {
       const context = globalThis.SillyTavern.getContext();

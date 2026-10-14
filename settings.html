@@ -118,17 +118,6 @@
         <div class="smp-submenu-content">
           <div id="smp-stats" class="smp-stats">Active blocks: 0</div>
 
-          <label class="checkbox_label">
-            <input id="smp-debug" type="checkbox">
-            <span data-smp-i18n="Debug logging">Debug logging</span>
-          </label>
-          <label for="smp-language" data-smp-i18n="Interface language">Interface language</label>
-          <select id="smp-language" class="text_pole">
-            <option value="auto" data-smp-i18n="SillyTavern language">SillyTavern language</option>
-            <option value="en">English</option>
-            <option value="ru">Русский</option>
-          </select>
-
           <div class="smp-actions">
             <button id="smp-compact-now" class="menu_button" type="button">
               <i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize history">Summarize history</span>
@@ -154,6 +143,21 @@
           <div class="smp-actions">
             <button id="smp-save-facts" class="menu_button" type="button" disabled><i class="fa-solid fa-check"></i><span data-smp-i18n="Save facts">Save facts</span></button>
             <span id="smp-facts-state"></span>
+          </div>
+        </div>
+      </details>
+
+      <details class="smp-submenu" data-section="debug">
+        <summary><i class="fa-solid fa-bug"></i><span data-smp-i18n="Debug">Debug</span></summary>
+        <div class="smp-submenu-content">
+          <label class="checkbox_label"><input id="smp-debug" type="checkbox"><span data-smp-i18n="Debug logging">Debug logging</span></label>
+          <label for="smp-language" data-smp-i18n="Interface language">Interface language</label>
+          <select id="smp-language" class="text_pole">
+            <option value="auto" data-smp-i18n="SillyTavern language">SillyTavern language</option>
+            <option value="en">English</option><option value="ru">Русский</option>
+          </select>
+          <div class="smp-actions">
+            <button id="smp-download-logs" class="menu_button" type="button"><i class="fa-solid fa-file-arrow-down"></i><span data-smp-i18n="Download logs">Download logs</span></button>
           </div>
         </div>
       </details>

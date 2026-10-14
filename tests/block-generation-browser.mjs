@@ -26,6 +26,8 @@ try {
   await page.waitForSelector('#smp-settings', { state: 'attached' });
   await page.locator('#preloader').waitFor({ state: 'hidden' });
   await page.evaluate(async () => {
+    const script = await import('/script.js');
+    script.changeMainAPI('kobold');
     const { getTokenCountAsync } = await import('/scripts/tokenizers.js');
     await getTokenCountAsync(' memory'.repeat(100), 0);
   });
