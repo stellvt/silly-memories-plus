@@ -6,6 +6,7 @@ import {
   generateRawData,
   getCurrentChatId,
   getMaxPromptTokens,
+  is_send_press,
   main_api,
   saveChatConditional,
   saveSettingsDebounced,
@@ -17,6 +18,10 @@ import {
 } from '../../../extensions.js';
 import { getTokenCountAsync, countTokensOpenAIAsync } from '../../../tokenizers.js';
 import { formatInstructModeChat } from '../../../instruct-mode.js';
+import { is_group_generating } from '../../../group-chats.js';
+import { appendFileContent } from '../../../chats.js';
+import { isExecutingCommandsFromChatInput } from '../../../slash-commands.js';
+import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { system_message_types } from '../../../system-messages.js';
 import { promptManager } from '../../../openai.js';
 import { ConnectionManagerRequestService } from '../../shared.js';
@@ -82,6 +87,12 @@ const runtime = {
   fixedPromptTokensByChat: new Map(),
   pendingPromptMeasurement: null,
   preparingPrompt: false,
+  liveGeneration: false,
+  passivePromptMeasurement: null,
+  passivePromptDirty: true,
+  passivePromptTimer: null,
+  passivePromptInFlight: false,
+  overheadRevision: 0,
   notice: null,
   selectedBlockId: null,
   editingBlockId: null,
@@ -184,6 +195,7 @@ function endMemoryJob() {
   updateBlockActionBar();
   updateManualRollupControls();
   updateJobControls();
+  schedulePassivePromptRefresh();
 }
 
 function getChatMemory() {
@@ -1376,6 +1388,78 @@ function scheduleContextRefresh() {
   runtime.contextRefreshTimer = setTimeout(() => {
     void refreshContextUsage(revision).catch(error => debug('Context estimate unavailable', error));
   }, 100);
+  schedulePassivePromptRefresh();
+}
+
+function schedulePassivePromptRefresh() {
+  clearTimeout(runtime.passivePromptTimer);
+  if (!runtime.passivePromptDirty) return;
+  runtime.passivePromptTimer = setTimeout(async () => {
+    const context = getContext();
+    if (runtime.liveGeneration || runtime.summarizing || runtime.passivePromptInFlight
+      || runtime.passivePromptMeasurement || is_send_press || is_group_generating
+      || isExecutingCommandsFromChatInput || document.body.dataset.generating
+      || getCurrentChatId() == null || !context.chat?.length) return;
+    // Group dry runs select a member as a side effect. Let the host initiate them.
+    if (context.groupId) return;
+    runtime.passivePromptInFlight = true;
+    const revision = runtime.overheadRevision;
+    try {
+      await context.generate('normal', {}, true);
+    } catch (error) { debug('Context estimate unavailable', error); }
+    finally {
+      runtime.passivePromptInFlight = false;
+      runtime.passivePromptMeasurement = null;
+      if (revision !== runtime.overheadRevision) schedulePassivePromptRefresh();
+    }
+  }, 600);
+}
+
+function beginPromptMeasurement(type, options, dryRun) {
+  runtime.passivePromptMeasurement = null;
+  if (!dryRun) return;
+  if (runtime.liveGeneration || runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
+  runtime.passivePromptMeasurement = {
+    chatId: getCurrentChatId(), revision: runtime.overheadRevision, api: main_api,
+    source: structuredClone(getCurrentComparableChat()),
+  };
+}
+
+async function measurePassivePrompt(data, dryRun) {
+  if (!dryRun) return;
+  const snapshot = runtime.passivePromptMeasurement;
+  runtime.passivePromptMeasurement = null;
+  if (!snapshot || snapshot.chatId == null || runtime.liveGeneration || runtime.summarizing) return;
+  const prompt = typeof data?.input === 'string' ? data.input : data?.prompt;
+  if (snapshot.api === 'openai' ? !Array.isArray(prompt) : typeof prompt !== 'string') return;
+  // Dry runs omit extension interceptors. Subtract only raw text actually present
+  // in the native prompt; clipped history must not become fixed prompt overhead.
+  const source = withPromptRoles(await Promise.all(snapshot.source.map(async (message, index) => {
+    const placement = message.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
+    const text = getRegexedString(message.mes, placement, { isPrompt: true, depth: snapshot.source.length - index - 1 });
+    const mes = await appendFileContent(message, text);
+    const titles = [message.extra?.append_title && message.extra?.title,
+      ...(message.extra?.media || []).filter(media => media.append_title).map(media => media.title)].filter(Boolean);
+    return { ...message, mes: titles.length ? `${mes}\n\n${titles.join('\n\n')}` : mes };
+  })));
+  const chatMode = snapshot.api === 'openai';
+  const matches = chatMode ? locateChatConversation(prompt, source) : locateTextConversation(prompt, source);
+  const native = chatMode ? promptManager?.messages?.flatten?.() || [] : [];
+  const total = chatMode ? await countChatPrompt(prompt, countTokensOpenAIAsync, native) : await getTokenCountAsync(prompt, 0);
+  const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(source[index].mes, 0)));
+  if (snapshot.chatId !== getCurrentChatId() || snapshot.revision !== runtime.overheadRevision
+    || snapshot.api !== main_api || runtime.liveGeneration || runtime.summarizing
+    || snapshot.source.length !== getCurrentComparableChat().length
+    || !fingerprintsStillMatch(snapshot.source.map(fingerprintMessage))) {
+    if (runtime.passivePromptDirty) schedulePassivePromptRefresh();
+    return;
+  }
+  const fixed = Math.max(0, total - included.reduce((sum, value) => sum + value, 0));
+  runtime.fixedPromptTokensByChat.set(String(snapshot.chatId), fixed);
+  runtime.contextBudgetsByChat.set(String(snapshot.chatId), getMaxPromptTokens());
+  runtime.passivePromptDirty = false;
+  recordDiagnostic('prompt-estimate', { mode: chatMode ? 'chat' : 'text', total, fixed, included: matches.size });
+  scheduleContextRefresh();
 }
 
 async function refreshContextUsage(revision) {
@@ -1782,7 +1866,7 @@ async function renderSettings() {
       });
     });
     document.getElementById('smp-export-block')?.addEventListener('click', exportSelectedBlock);
-    document.getElementById('smp-refresh')?.addEventListener('click', () => renderLibrary());
+    document.getElementById('smp-refresh')?.addEventListener('click', () => { clearCurrentOverheadEstimate(); renderLibrary(); });
     document.getElementById('smp-export')?.addEventListener('click', exportCurrentMemory);
     document.getElementById('smp-download-logs')?.addEventListener('click', () => {
       recordDiagnostic('export');
@@ -1830,6 +1914,8 @@ function refreshLanguage() {
 }
 
 function onChatChanged() {
+  ++runtime.overheadRevision;
+  runtime.passivePromptDirty = true;
   recordDiagnostic('chat-changed');
   if (runtime.notice) globalThis.toastr?.remove(runtime.notice);
   runtime.notice = null;
@@ -1927,6 +2013,7 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     const counted = await countCoreChat(desired);
     const finalFixed = Math.max(0, actual - sumTokens(counted));
     runtime.fixedPromptTokensByChat.set(pending.chatId, finalFixed);
+    runtime.passivePromptDirty = false;
     ++runtime.contextRevision;
     showContextUsage(getContextUsage({ budget: pending.budget,
       memory: sumTokens(counted.filter(entry => isSynthetic(entry.message) && !entry.message.extra?.sillyMemoriesPlusPinnedFacts)),
@@ -1971,13 +2058,16 @@ async function prepareTextRequest(data, dryRun) {
 function prepareChatEvent(data) { return prepareFinalPrompt(data); }
 
 function clearCurrentOverheadEstimate() {
+  ++runtime.overheadRevision;
+  runtime.passivePromptDirty = true;
   runtime.fixedPromptTokensByChat.delete(String(getCurrentChatId()));
   runtime.contextBudgetsByChat.delete(String(getCurrentChatId()));
+  if (runtime.contextUsage) showContextUsage(getContextUsage({ ...runtime.contextUsage, budget: getMaxPromptTokens(), other: 0, otherKnown: false }));
   scheduleContextRefresh();
 }
 
 async function validateAfterChatMutation(label) {
-  scheduleContextRefresh();
+  clearCurrentOverheadEstimate();
   const memory = getChatMemory();
   if (!getActiveBlocks(memory).length) return;
   if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
@@ -1999,22 +2089,31 @@ eventSource.on(event_types.GENERATE_AFTER_COMBINE_PROMPTS, data => {
 });
 eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, prepareChatSettings);
 eventSource.on(event_types.GENERATE_AFTER_DATA, prepareTextRequest);
+eventSource.on(event_types.GENERATE_AFTER_DATA, measurePassivePrompt);
+eventSource.on(event_types.GENERATION_STARTED, beginPromptMeasurement);
+eventSource.on(event_types.GENERATION_AFTER_COMMANDS, (type, options, dryRun) => {
+  if (!dryRun) runtime.liveGeneration = getContext().onlineStatus !== 'no_connection';
+});
 eventSource.on(event_types.GENERATION_STARTED, () => {
   // Validate after other extensions have contributed to this generation.
   eventSource.makeLast(event_types.CHAT_COMPLETION_PROMPT_READY, prepareChatEvent);
   eventSource.makeLast(event_types.CHAT_COMPLETION_SETTINGS_READY, prepareChatSettings);
   eventSource.makeLast(event_types.GENERATE_AFTER_DATA, prepareTextRequest);
 });
-eventSource.on(event_types.GENERATION_ENDED, () => { runtime.pendingPromptMeasurement = null; });
+for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) eventSource.on(event, () => {
+  runtime.pendingPromptMeasurement = null;
+  runtime.liveGeneration = false;
+  scheduleContextRefresh();
+});
 eventSource.on(event_types.PRESET_CHANGED, clearCurrentOverheadEstimate);
 eventSource.on(event_types.OAI_PRESET_CHANGED_AFTER, clearCurrentOverheadEstimate);
 eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, clearCurrentOverheadEstimate);
-for (const event of [event_types.SETTINGS_UPDATED, event_types.WORLDINFO_UPDATED, event_types.WORLDINFO_SETTINGS_UPDATED, event_types.MAIN_API_CHANGED, event_types.PERSONA_CHANGED, event_types.CHARACTER_EDITED]) eventSource.on(event, clearCurrentOverheadEstimate);
+for (const event of [event_types.SETTINGS_UPDATED, event_types.WORLDINFO_UPDATED, event_types.WORLDINFO_SETTINGS_UPDATED, event_types.MAIN_API_CHANGED, event_types.CHATCOMPLETION_SOURCE_CHANGED, event_types.PERSONA_CHANGED, event_types.CHARACTER_EDITED]) eventSource.on(event, clearCurrentOverheadEstimate);
 eventSource.on(event_types.MESSAGE_EDITED, () => void validateAfterChatMutation(msg('Message edited')));
 eventSource.on(event_types.MESSAGE_UPDATED, () => void validateAfterChatMutation(msg('Message updated')));
 eventSource.on(event_types.MESSAGE_SWIPED, () => void validateAfterChatMutation(msg('Swipe changed')));
 eventSource.on(event_types.MESSAGE_DELETED, () => void validateAfterChatMutation(msg('Message deleted')));
-eventSource.on(event_types.MESSAGE_SENT, scheduleContextRefresh);
-eventSource.on(event_types.MESSAGE_RECEIVED, scheduleContextRefresh);
+eventSource.on(event_types.MESSAGE_SENT, clearCurrentOverheadEstimate);
+eventSource.on(event_types.MESSAGE_RECEIVED, clearCurrentOverheadEstimate);
 
 if (document.readyState !== 'loading') setTimeout(() => void renderSettings(), 0);

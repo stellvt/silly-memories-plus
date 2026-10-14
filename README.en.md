@@ -31,7 +31,7 @@ A block's level tells you what it summarizes:
 
 When memory takes up too much space, the extension merges eligible blocks. It can also merge them before reaching the threshold if the next request needs more room. The latest two messages are always kept in full.
 
-The context meter above the submenus breaks usage down into memory, original history, pinned facts, and the rest of the prompt. It shows the compaction threshold and remaining space. The rest of the prompt is measured when a request is prepared; until then, the meter shows only the known usage.
+The context meter above the submenus breaks usage down into memory, original history, pinned facts, and the rest of the prompt. It shows the compaction threshold and remaining space. The prompt is measured in the background when you open a chat or change messages or settings. Click **Refresh** to measure it manually.
 
 ## Working with blocks
 
