@@ -53,6 +53,8 @@ Select a block and click **Regenerate block**. You can add a preference, such as
 
 If the block is part of higher-level memory, regeneration also rebuilds the dependent merges.
 
+Regenerating a merged block first updates source blocks whose messages have changed, then creates a new merge from them. You can review the new merged block before saving.
+
 ### Merging blocks
 
 Click the level badges on two or more adjacent active blocks of the same level, then click **Merge L1 → L2** or the corresponding action for that level.
@@ -92,7 +94,7 @@ The target sets the desired size; a complete summary can exceed it. The extensio
 
 If context is over budget, switch some blocks back to summary mode, shorten pinned facts, or increase the context window in SillyTavern.
 
-The preset, active lorebooks, and additional prompts are counted in the assembled request. Before sending, the extension checks that memory and recent history are present. Brief notifications announce task starts, completion, and errors.
+The preset, active lorebooks, and additional prompts are counted in the assembled request. If the first message contains macros, the remaining prompt is measured during generation. Before sending, the extension checks that memory and recent history are present. Brief notifications announce task starts, completion, and errors.
 
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Debug → Interface language**.
 

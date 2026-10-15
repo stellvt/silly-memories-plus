@@ -17,7 +17,7 @@ await mkdir(directory, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.SMP_BROWSER_EXECUTABLE, headless: true });
 const page = await browser.newPage({ viewport: { width: 1100, height: 1100 } });
 const saves = [];
-await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save/, route => {
+await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save|\/api\/settings\/save/, route => {
   saves.push(route.request().postDataJSON());
   return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
 });
@@ -41,6 +41,9 @@ try {
     const { Popup } = await import('/scripts/popup.js');
     for (const popup of [...Popup.util.popups]) if (popup.dlg.open) await popup.complete(1);
     const context = SillyTavern.getContext();
+    // This suite controls assembled prompts explicitly. Native idle builds have
+    // their own suite and must not replace these measurements between checks.
+    document.body.dataset.generating = 'pinned-context-audit';
     script.changeMainAPI('openai');
     const { oai_settings } = await import('/scripts/openai.js');
     oai_settings.chat_completion_source = 'openai';
@@ -166,7 +169,9 @@ try {
   await page.locator('#smp-save-preview').click();
   await page.waitForFunction(() => document.getElementById('smp-status').dataset.kind === 'success');
   await check('regeneration-preserves-facts', await page.evaluate(() => pinsTest.context.chatMetadata.silly_memories_plus.pinnedFacts.includes('pinned')));
-  await page.locator(`.smp-block[data-block-id="${blockId}"] > summary`).click();
+  if (!await page.locator(`.smp-block[data-block-id="${blockId}"]`).evaluate(card => card.open)) {
+    await page.locator(`.smp-block[data-block-id="${blockId}"] > summary`).click();
+  }
   await page.locator(`.smp-block[data-block-id="${blockId}"] [data-smp-block-action="delete"]`).click();
   await page.waitForFunction(() => !pinsTest.context.chatMetadata.silly_memories_plus.blocks.length);
   await check('block-delete-preserves-facts', await page.evaluate(() => pinsTest.context.chatMetadata.silly_memories_plus.pinnedFacts.includes('pinned')));

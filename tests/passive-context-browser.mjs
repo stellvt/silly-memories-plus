@@ -6,7 +6,8 @@ import { resolve } from 'node:path';
 // Failure cases: no idle measurement, stale preset/lore/model counts, clipped
 // history counted as fixed overhead, regex text counted twice, cross-chat races,
 // accidental provider/summarizer requests, chat mutations, background work during
-// generation, and idle refresh overwriting a validated generation measurement.
+// generation, idle refresh overwriting a validated generation measurement, and
+// native dry runs expanding macros into the first stored message.
 const require = createRequire(import.meta.url);
 const { chromium } = require(resolve(process.env.CODEX_NODE_MODULES, 'playwright'));
 const directory = process.env.SMP_ARTIFACT_DIR;
@@ -157,6 +158,21 @@ try {
   await page.waitForFunction(before => pc.dryRuns > before, beforeOffline);
   await waitMeasured();
   await check('offline-generation-does-not-block-idle-refresh', true);
+  const beforeFirstMacro = await page.evaluate(async () => {
+    pc.c.chat[0].mes = '{{getvar::passive_first_message}}';
+    pc.c.chatMetadata.variables = { passive_first_message: 'Expanded first message.' };
+    await pc.script.eventSource.emit(pc.script.event_types.MESSAGE_EDITED, 0);
+    return pc.dryRuns;
+  });
+  await page.waitForTimeout(1400);
+  await check('first-message-macros-stay-stored-during-idle-measurement', await page.evaluate(before => pc.dryRuns === before && pc.c.chat[0].mes === '{{getvar::passive_first_message}}', beforeFirstMacro));
+  await page.evaluate(async () => {
+    pc.c.chat[0].mes = 'Expanded first message.';
+    await pc.script.eventSource.emit(pc.script.event_types.MESSAGE_EDITED, 0);
+  });
+  await page.waitForFunction(before => pc.dryRuns > before, beforeFirstMacro);
+  await waitMeasured();
+  await check('idle-measurement-resumes-after-first-message-is-expanded', true);
   await check('no-provider-requests', requests.length === 0);
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'passive-context.png') });
 } catch (error) { failure = String(error.stack || error); }

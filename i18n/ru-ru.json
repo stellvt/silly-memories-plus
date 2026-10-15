@@ -1,4 +1,9 @@
 {
+  "smp.Memory graph contains a cycle.": "В графе памяти обнаружен цикл.",
+  "smp.Source contains hidden messages. Restore them before regenerating this block.": "В исходнике есть скрытые сообщения. Восстановите их перед регенерацией блока.",
+  "smp.Chat changed before memory commit.": "Чат сменился до сохранения памяти.",
+  "smp.Memory changed during the operation. Try again.": "Память изменилась во время операции. Повторите действие.",
+  "smp.Source block ${0} changed. Regenerate that block before merging.": "Исходный блок ${0} изменился. Регенерируйте его перед объединением.",
   "smp.Stop task": "Остановить",
   "smp.Open a chat to measure context.": "Откройте чат.",
   "smp.Compaction policy": "Сжатие истории",
@@ -72,7 +77,7 @@
   "smp.Chat changed; generate a new preview.": "Чат сменился; создайте новый вариант.",
   "smp.Memory changed; generate a new preview.": "Память изменилась; создайте новый вариант.",
   "smp.Source messages changed; generate a new preview.": "Исходные сообщения изменились; создайте новый вариант.",
-  "smp.Saved block replacement and ${0} dependent merge(s).": "Замена блока и зависимые объединения сохранены: ${0}.",
+  "smp.Saved ${0} updated memory blocks.": "Обновлённые блоки памяти сохранены: ${0}.",
   "smp.Saved block replacement.": "Замена блока сохранена.",
   "smp.Another compaction job is already running": "Другая задача сжатия уже выполняется",
   "smp.No active chat": "Нет активного чата",

@@ -10,6 +10,7 @@ import {
   main_api,
   saveChatConditional,
   saveSettingsDebounced,
+  substituteParams,
 } from '../../../../script.js';
 import {
   extension_settings,
@@ -68,7 +69,7 @@ import {
 import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
 import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory } from './lib/prompt.mjs';
 import { installNativeContextManagement } from './lib/native-context.mjs';
-import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, reconcileMemorySources } from './lib/source-identity.mjs';
+import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, inspectBlockSource, reconcileMemorySources } from './lib/source-identity.mjs';
 import { diagnosticError, recordDiagnostic, exportDiagnostics, nextDiagnosticRequest } from './lib/diagnostics.mjs';
 import { diagnosticName, inspectConversation, inspectChatPrompt } from './lib/prompt-inspection.mjs';
 import { getCurrentLocale, translate as nativeTranslate } from '../../../i18n.js';
@@ -92,7 +93,7 @@ const runtime = {
   fixedPromptTokensByChat: new Map(),
   preparedHistoryByChat: new Map(),
   pendingPromptMeasurement: null,
-  preparingPrompt: false,
+  preparingPrompt: null,
   liveGeneration: false,
   passivePromptMeasurement: null,
   passivePromptDirty: true,
@@ -102,6 +103,8 @@ const runtime = {
   notice: null,
   selectedBlockId: null,
   editingBlockId: null,
+  editingBlockSnapshot: null,
+  libraryChatId: null,
   manualRollupIds: new Set(),
   libraryTab: 'active',
   regenerationBlockId: null,
@@ -187,11 +190,12 @@ function setStatus(kind, text) {
 }
 
 function updateJobControls() {
+  const busy = runtime.summarizing || runtime.queued;
   const cancel = document.getElementById('smp-cancel');
   if (cancel) cancel.disabled = !runtime.summarizing || runtime.cancelRequested;
   for (const id of ['smp-generate-preview', 'smp-save-preview', 'smp-close-regeneration', 'smp-discard-preview', 'smp-compact-now', 'smp-test-summarizer', 'smp-clear']) {
     const button = document.getElementById(id);
-    if (button) button.disabled = runtime.summarizing || (id === 'smp-save-preview' && !runtime.regenerationPreview);
+    if (button) button.disabled = busy || (id === 'smp-save-preview' && !runtime.regenerationPreview);
   }
   const wish = document.getElementById('smp-regeneration-wish');
   if (wish) wish.disabled = runtime.summarizing;
@@ -202,7 +206,7 @@ function updateJobControls() {
 }
 
 function beginMemoryJob(chatId = null) {
-  if (runtime.summarizing) throw new LocalizedError(msg('Another memory job is already running'));
+  if (runtime.summarizing || runtime.queued) throw new LocalizedError(msg('Another memory job is already running'));
   runtime.summarizing = true;
   runtime.diagnosticRequestId = nextDiagnosticRequest();
   runtime.cancelRequested = false;
@@ -297,6 +301,10 @@ function getCurrentComparableChat() {
     .map((message, index) => ({ ...message, index }));
 }
 
+function excludedSourceMessages() {
+  return getCurrentComparableChat().filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' }));
+}
+
 function fingerprintsStillMatch(fingerprints) {
   const current = getCurrentComparableChat();
   const missing = fingerprints.flatMap(fingerprint => {
@@ -312,9 +320,19 @@ function fingerprintsStillMatch(fingerprints) {
   return !missing.length;
 }
 
-function memoryPromptSnapshot() {
-  const memory = getChatMemory();
+function memoryPromptSnapshot(memory = getChatMemory()) {
   return JSON.stringify({ pinnedFacts: memory.pinnedFacts, blocks: memory.blocks.map(({ summaryTokens, rawTokens, ...block }) => block) });
+}
+
+function assertMemoryEditCurrent(chatId, snapshot) {
+  if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before memory commit.'));
+  if (snapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during the operation. Try again.'));
+}
+
+function verifyMemorySources(memory) {
+  const result = reconcileMemorySources(memory, getCurrentComparableChat());
+  if (result.changes.length) recordDiagnostic('memory-reconciled', { invalidated: result.changedIds.length, recovered: result.recoveredIds.length, blocks: result.changes });
+  return result.memory;
 }
 
 function activeMemoryIsValid(rawChat, memory) {
@@ -342,11 +360,11 @@ async function countCoreChat(coreChat) {
   return counts;
 }
 
-async function refreshActiveBlockTokenCounts(memory, settings) {
+async function refreshActiveBlockTokenCounts(memory, settings, sourceChat) {
   for (const block of memory.blocks) {
     if (block.status !== 'active') continue;
     block.summaryTokens = await countTextTokens(renderBlockText(block, settings.includeStructuredMemory));
-    if (block.useRaw) block.rawTokens = sumTokens(await countCoreChat(getBlockRangeMessages(block)));
+    if (block.useRaw) block.rawTokens = sumTokens(await countCoreChat(sourceChat.filter(message => message.index >= block.sourceFrom && message.index <= block.sourceTo)));
   }
   return memory;
 }
@@ -531,6 +549,13 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
       groups = chunkByTokenBudget(units, Math.floor(inputBudget * 0.9)).map(formatRawSources);
     }
   } else {
+    for (const child of childBlocks) {
+      const evidence = inspectBlockSource(child, currentChat);
+      if (child.staleReason === 'summary-edited' || hasSourceIdentity(child) && !evidence.matches || evidence.reason === 'source-hidden') {
+        recordDiagnostic('source-check-failed', { requestId: runtime.diagnosticRequestId, blocks: [{ id: child.id, from: child.sourceFrom, to: child.sourceTo, ...evidence }] });
+        throw new LocalizedError(msg`Source block ${child.id} changed. Regenerate that block before merging.`);
+      }
+    }
     const prompt = formatSummarySources(childBlocks);
     groups = await countTokens(prompt) <= Math.floor(inputBudget * 0.9) ? [prompt]
       : await chunkStructuredSources(childBlocks.map(block => ({ level: block.level,
@@ -620,6 +645,7 @@ function getBlockRangeMessages(block) {
   if (!Number.isFinite(sourceFrom) || !Number.isFinite(sourceTo) || sourceTo < sourceFrom || messages.length !== expectedCount) {
     throw new LocalizedError(msg`Raw source ${sourceFrom}–${sourceTo} is no longer fully available`);
   }
+  if (messages.some(message => message.extra?.[Symbol.for('ignore')])) throw new LocalizedError(msg('Source contains hidden messages. Restore them before regenerating this block.'));
   return messages;
 }
 
@@ -663,7 +689,7 @@ function regenerationSourceSnapshot(memory, ids) {
 function assertRegenerationCurrent(preview) {
   // A preview replaces only the graph and source snapshot it was generated from.
   if (getCurrentChatId() !== preview.chatId) throw new LocalizedError(msg('Chat changed; generate a new preview.'));
-  if (JSON.stringify(getChatMemory()) !== preview.originalMemory) throw new LocalizedError(msg('Memory changed; generate a new preview.'));
+  if (memoryPromptSnapshot() !== preview.originalMemory) throw new LocalizedError(msg('Memory changed; generate a new preview.'));
   if (regenerationSourceSnapshot(preview.memory, preview.ids) !== preview.sourceSnapshot) {
     throw new LocalizedError(msg('Source messages changed; generate a new preview.'));
   }
@@ -678,7 +704,7 @@ async function saveRegenerationPreview() {
   closeRegeneration();
   await setChatMemory(preview.memory, true, preview.chatId);
   setStatus('success', preview.ids.length > 1
-    ? msg`Saved block replacement and ${preview.ids.length - 1} dependent merge(s).`
+    ? msg`Saved ${preview.ids.length} updated memory blocks.`
     : msg('Saved block replacement.'));
 }
 
@@ -691,7 +717,7 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
   if (!selected) throw new LocalizedError(msg('Selected memory block no longer exists'));
 
   const ids = [selected.id, ...getBlockAncestorIds(original, selected.id)];
-  const originalMemory = JSON.stringify(original);
+  const originalMemory = memoryPromptSnapshot(original);
   const sourceSnapshot = regenerationSourceSnapshot(original, ids);
   const settings = getSettings();
 
@@ -702,6 +728,7 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
     const result = await stageBlockRegeneration({
       memory: original,
       blockId: selected.id,
+      sourceNeedsRegeneration: block => block.staleReason === 'summary-edited' || hasSourceIdentity(block) && !blockSourceMatches(block, getCurrentComparableChat()),
       onStage: ({ block, position, total }) => {
         if (runtime.cancelRequested) throw new LocalizedError(msg('Block regeneration cancelled'));
         if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed during block regeneration'));
@@ -737,7 +764,7 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
 
     if (runtime.cancelRequested) throw new LocalizedError(msg('Block regeneration cancelled'));
     if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before regenerated block commit'));
-    const preview = { memory: result.memory, originalMemory, sourceSnapshot, ids, blockId: selected.id, chatId };
+    const preview = { memory: result.memory, originalMemory, sourceSnapshot, ids: result.regeneratedIds, blockId: selected.id, chatId };
     assertRegenerationCurrent(preview);
     runtime.regenerationPreview = preview;
     const replacement = getBlockById(result.memory, selected.id);
@@ -758,6 +785,7 @@ async function createManualRollup() {
   const chatId = getCurrentChatId();
   if (chatId == null) throw new LocalizedError(msg('No active chat'));
   const memory = getChatMemory();
+  const snapshot = memoryPromptSnapshot(memory);
   const selected = getManualRollupBlocks(memory, [...runtime.manualRollupIds]);
   const sourceLevel = selected[0].level;
   const targetLevel = sourceLevel + 1;
@@ -780,6 +808,7 @@ async function createManualRollup() {
     });
     if (runtime.cancelRequested) throw new LocalizedError(msg('Manual rollup cancelled'));
     if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before manual rollup commit'));
+    assertMemoryEditCurrent(chatId, snapshot);
     runtime.manualRollupIds.clear();
     runtime.selectedBlockId = result.rollupBlock.id;
     await setChatMemory(result.memory, true, chatId);
@@ -797,8 +826,10 @@ async function createManualRollup() {
 }
 
 async function toggleBlockRawSource(blockId) {
-  if (runtime.summarizing) return;
+  if (runtime.summarizing || runtime.queued) return;
+  const chatId = getCurrentChatId();
   const memory = getChatMemory();
+  const snapshot = memoryPromptSnapshot(memory);
   const block = getBlockById(memory, blockId);
   if (!block) return;
   const useRaw = !block.useRaw;
@@ -808,12 +839,14 @@ async function toggleBlockRawSource(blockId) {
     nextBlock.rawTokens = sumTokens(await countCoreChat(getBlockRangeMessages(block)));
     runtime.manualRollupIds.delete(block.id);
   }
-  await setChatMemory(next);
+  assertMemoryEditCurrent(chatId, snapshot);
+  await setChatMemory(next, true, chatId);
   setStatus('success', useRaw ? msg('Using original history for this block.') : msg('Using summary for this block.'));
 }
 
 async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
-  if (runtime.summarizing) return;
+  if (runtime.summarizing || runtime.queued) return;
+  const chatId = getCurrentChatId();
   const memory = getChatMemory();
   const selected = getBlockById(memory, blockId);
   if (!selected) return;
@@ -824,19 +857,10 @@ async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
     : msg`Delete selected L${selected.level} block? Its raw source will become visible again.`;
   if (!confirm(displayText(message))) return;
 
-  for (const id of preview.reactivatedIds) {
-    const block = getBlockById(preview.memory, id);
-    if (!block) continue;
-    try {
-      refreshBlockSourceIdentity(block);
-    } catch {
-      block.status = 'stale';
-      block.staleReason = 'source-changed';
-      if (!preview.staleIds.includes(id)) preview.staleIds.push(id);
-    }
-  }
-
-  await setChatMemory(preview.memory);
+  preview.memory = verifyMemorySources(preview.memory);
+  preview.staleIds = preview.memory.blocks.filter(block => block.status === 'stale' && getBlockById(memory, block.id)?.status !== 'stale').map(block => block.id);
+  preview.reactivatedIds = preview.reactivatedIds.filter(id => getBlockById(preview.memory, id)?.status === 'active');
+  await setChatMemory(preview.memory, true, chatId);
   recordDiagnostic('memory-deleted', { targetId: selected.id, removedIds: preview.removedIds,
     blocks: preview.memory.blocks.filter(block => preview.staleIds.includes(block.id) || preview.reactivatedIds.includes(block.id))
       .map(block => ({ id: block.id, level: block.level, from: block.sourceFrom, to: block.sourceTo, status: block.status, reason: block.staleReason || 'parent-deleted' })) });
@@ -859,7 +883,7 @@ function closeBlockEditor(blockId = runtime.editingBlockId) {
   const editor = blockElement?.querySelector('.smp-inline-editor');
   if (view instanceof HTMLElement) view.hidden = false;
   if (editor instanceof HTMLElement) editor.hidden = true;
-  if (runtime.editingBlockId === String(blockId || '')) runtime.editingBlockId = null;
+  if (runtime.editingBlockId === String(blockId || '')) { runtime.editingBlockId = null; runtime.editingBlockSnapshot = null; }
 }
 
 function openBlockEditor(blockId) {
@@ -871,6 +895,7 @@ function openBlockEditor(blockId) {
   if (runtime.editingBlockId && runtime.editingBlockId !== block.id) closeBlockEditor(runtime.editingBlockId);
   selectMemoryBlock(block.id);
   runtime.editingBlockId = block.id;
+  runtime.editingBlockSnapshot = JSON.stringify(block.structured);
   const blockElement = findBlockElement(block.id);
   const view = blockElement?.querySelector('.smp-block-view');
   const editor = blockElement?.querySelector('.smp-inline-editor');
@@ -898,12 +923,14 @@ function readBlockEditor(blockElement) {
 }
 
 async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
-  if (runtime.summarizing) return;
+  if (runtime.summarizing || runtime.queued) return;
   const chatId = getCurrentChatId();
   if (chatId == null) throw new LocalizedError(msg('No active chat'));
   const memory = getChatMemory();
   const block = getBlockById(memory, blockId);
   if (!block) throw new LocalizedError(msg('Selected memory block no longer exists'));
+  const snapshot = memoryPromptSnapshot(memory);
+  if (runtime.editingBlockSnapshot !== JSON.stringify(block.structured)) throw new LocalizedError(msg('Memory changed during the operation. Try again.'));
   const dependentCount = getBlockAncestorIds(memory, block.id).length;
   if (dependentCount && !confirm(t`Editing this block will mark ${dependentCount} dependent rollup(s) stale and reactivate their source blocks. Continue?`)) {
     return;
@@ -913,19 +940,11 @@ async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
   const structured = readBlockEditor(blockElement);
   const settings = getSettings();
   const summaryTokens = await countTextTokens(renderBlockText({ ...block, structured }, settings.includeStructuredMemory));
+  assertMemoryEditCurrent(chatId, snapshot);
   const result = editMemoryBlock(memory, block.id, structured, summaryTokens);
-
-  for (const id of result.reactivatedIds) {
-    const reactivated = getBlockById(result.memory, id);
-    if (!reactivated) continue;
-    try {
-      refreshBlockSourceIdentity(reactivated);
-    } catch {
-      reactivated.status = 'stale';
-      reactivated.staleReason = 'source-changed';
-      if (!result.staleIds.includes(id)) result.staleIds.push(id);
-    }
-  }
+  result.memory = verifyMemorySources(result.memory);
+  result.staleIds = result.memory.blocks.filter(item => item.status === 'stale' && getBlockById(memory, item.id)?.status !== 'stale').map(item => item.id);
+  result.reactivatedIds = result.reactivatedIds.filter(id => getBlockById(result.memory, id)?.status === 'active');
   if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before edited block commit'));
   runtime.editingBlockId = null;
   await setChatMemory(result.memory, true, chatId);
@@ -1104,6 +1123,7 @@ function applyMemoryToCoreChat(coreChat, memory) {
 function assertBlockSourceStillCurrent(block, chatId, label) {
   if (getCurrentChatId() !== chatId) throw new LocalizedError(msg`Chat changed during ${typeof label === 'string' ? msg(label) : label}`);
   if (!fingerprintsStillMatch(block.sourceFingerprints)) throw new LocalizedError(msg`Source changed during ${typeof label === 'string' ? msg(label) : label}`);
+  if (inspectBlockSource(block, getCurrentComparableChat()).reason === 'source-hidden') throw new LocalizedError(msg('Source contains hidden messages. Restore them before regenerating this block.'));
 }
 
 function assertPinnedFactsCurrent(memory, chatId) {
@@ -1116,6 +1136,7 @@ function assertPinnedFactsCurrent(memory, chatId) {
 async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, force) {
   runtime.abortController = new AbortController();
   runtime.activeCompactionChatId = chatId;
+  let committedSnapshot = memoryPromptSnapshot(memory);
   try {
     const result = await stageCompactionTransaction({
       plan,
@@ -1158,7 +1179,9 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
         if (!fingerprintsStillMatch(preparedFingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
         for (const block of getActiveFrontier(candidate).blocks) assertBlockSourceStillCurrent(block, chatId, msg('compaction'));
         assertPinnedFactsCurrent(candidate, chatId);
+        assertMemoryEditCurrent(chatId, committedSnapshot);
         await setChatMemory(candidate, true, chatId);
+        committedSnapshot = memoryPromptSnapshot(candidate);
         recordDiagnostic('checkpoint', { requestId: runtime.diagnosticRequestId, totalBlocks: candidate.blocks.length,
           blocks: candidate.blocks.map(block => ({ id: block.id, level: block.level, from: block.sourceFrom, to: block.sourceTo, status: block.status, reason: block.staleReason })) });
       },
@@ -1197,14 +1220,41 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
 }
 
 async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedTokens = null) {
+  if (!Array.isArray(coreChat) || !coreChat.length || runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
+  if (runtime.queued) { abort?.(true); return; }
+  runtime.queued = true;
+  updateJobControls();
+  const chatId = getCurrentChatId();
+  try {
+    if (type === 'manual') {
+      const snapshot = memoryPromptSnapshot();
+      const fingerprints = getCurrentComparableChat().map(fingerprintMessage);
+      const cache = runtime.preparedHistoryByChat.get(String(chatId));
+      const formatted = await prepareStoredHistory(coreChat);
+      assertMemoryEditCurrent(chatId, snapshot);
+      if (!fingerprintsStillMatch(fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
+      coreChat.splice(0, coreChat.length, ...formatted.map(message => {
+        const cached = cache?.get(message.index);
+        const text = cached?.hash === fingerprints.find(item => item.index === message.index)?.hash
+          ? cached.promptText : substituteParams(message.mes);
+        return { ...message, mes: text, promptText: text };
+      }));
+    }
+    return await prepareMemoryContext(coreChat, contextSize, abort, type, measuredFixedTokens);
+  } catch (error) {
+    if (getCurrentChatId() === chatId) setStatus('error', error);
+    abort?.(true);
+  }
+  finally { runtime.forceCompaction = false; runtime.queued = false; updateJobControls(); schedulePassivePromptRefresh(); }
+}
+
+async function prepareMemoryContext(coreChat, contextSize, abort, type, measuredFixedTokens = null) {
   const settings = getSettings();
-  if (!Array.isArray(coreChat) || !coreChat.length) return;
-  if (runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
   const requestId = type === 'prepared' ? runtime.pendingPromptMeasurement?.requestId : nextDiagnosticRequest();
   runtime.diagnosticRequestId = requestId;
-  const excluded = getCurrentComparableChat().filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' }));
-  // Synthetic facts never become a source or accumulate across interceptor calls.
-  const sourceChat = coreChat.filter(message => !message.extra?.sillyMemoriesPlusPinnedFacts && !message.extra?.[Symbol.for('ignore')]);
+  const excluded = excludedSourceMessages();
+  // Injected memory and facts never become raw sources on repeated interception.
+  const sourceChat = coreChat.filter(message => !isSynthetic(message) && !message.extra?.[Symbol.for('ignore')]);
   if (sourceChat.length !== coreChat.length) coreChat.splice(0, coreChat.length, ...sourceChat);
   runtime.contextBudgetsByChat.set(String(getCurrentChatId()), contextSize);
   ++runtime.contextRevision;
@@ -1225,7 +1275,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
     }
     if (settings.enabled) {
       // A gap controls coverage; it is not evidence that later sources changed.
-      memory = await refreshActiveBlockTokenCounts(memory, settings);
+      memory = await refreshActiveBlockTokenCounts(memory, settings, coreChat);
     }
     const facts = renderPinnedFacts(memory.pinnedFacts);
     pinnedTokens = facts ? await countTextTokens(facts) : 0;
@@ -1324,7 +1374,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
   try {
     // Check the actual saved blocks after success or a provider failure.
     memory = getChatMemory();
-    if (settings.enabled) memory = await refreshActiveBlockTokenCounts(memory, settings);
+    if (settings.enabled) memory = await refreshActiveBlockTokenCounts(memory, settings, coreChat);
     const frontier = settings.enabled ? getActiveFrontier(memory) : { blocks: [], coveredThrough: -1 };
     const finalRaw = await countCoreChat(getUncoveredMessages(coreChat, frontier.blocks));
     const facts = renderPinnedFacts(memory.pinnedFacts);
@@ -1404,12 +1454,19 @@ function schedulePassivePromptRefresh() {
   if (!runtime.passivePromptDirty) return;
   runtime.passivePromptTimer = setTimeout(async () => {
     const context = getContext();
-    if (runtime.liveGeneration || runtime.summarizing || runtime.passivePromptInFlight
+    if (runtime.liveGeneration || runtime.summarizing || runtime.queued || runtime.preparingPrompt || runtime.passivePromptInFlight
       || runtime.passivePromptMeasurement || is_send_press || is_group_generating
       || isExecutingCommandsFromChatInput || document.body.dataset.generating
       || getCurrentChatId() == null || !context.chat?.length) return;
     // Group dry runs select a member as a side effect. Let the host initiate them.
     if (context.groupId) return;
+    // Native Generate writes macro expansion into chat[0], even in a dry run.
+    // Let a foreground generation own that change instead of invalidating memory
+    // from idle token measurement.
+    if (/\{\{[\s\S]*?\}\}/.test(String(context.chat[0]?.mes || ''))) {
+      recordDiagnostic('prompt-estimate-skipped', { phase: 'passive', reason: 'first-message-macros-have-native-side-effects', index: 0 });
+      return;
+    }
     runtime.passivePromptInFlight = true;
     const revision = runtime.overheadRevision;
     try {
@@ -1446,14 +1503,7 @@ async function measurePassivePrompt(data, dryRun) {
   const preparedHistory = nativeContext.snapshot();
   // Dry runs omit extension interceptors. Subtract only raw text actually present
   // in the native prompt; clipped history must not become fixed prompt overhead.
-  const source = withPromptRoles(await Promise.all(snapshot.source.filter(message => !message.extra?.[Symbol.for('ignore')]).map(async (message) => {
-    const placement = message.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
-    const text = getRegexedString(message.mes, placement, { isPrompt: true, depth: snapshot.source.length - message.index - 1 });
-    const mes = await appendFileContent(message, text);
-    const titles = [message.extra?.append_title && message.extra?.title,
-      ...(message.extra?.media || []).filter(media => media.append_title).map(media => media.title)].filter(Boolean);
-    return { ...message, mes: titles.length ? `${mes}\n\n${titles.join('\n\n')}` : mes };
-  })), preparedHistory);
+  const source = withPromptRoles(await prepareStoredHistory(snapshot.source), preparedHistory);
   const chatMode = snapshot.api === 'openai';
   const matches = chatMode ? locateChatConversation(prompt, source) : locateTextConversation(prompt, source);
   const native = chatMode ? promptManager?.messages?.flatten?.() || [] : [];
@@ -1478,6 +1528,17 @@ async function measurePassivePrompt(data, dryRun) {
     environment: diagnosticEnvironment(), ...inspection, matches: undefined,
     excluded: snapshot.source.filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' })) });
   scheduleContextRefresh();
+}
+
+async function prepareStoredHistory(source) {
+  return Promise.all(source.filter(message => !message.extra?.[Symbol.for('ignore')]).map(async message => {
+    const placement = message.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
+    const text = getRegexedString(message.mes, placement, { isPrompt: true, depth: source.length - message.index - 1 });
+    const mes = await appendFileContent(message, text);
+    const titles = [message.extra?.append_title && message.extra?.title,
+      ...(message.extra?.media || []).filter(media => media.append_title).map(media => media.title)].filter(Boolean);
+    return { ...message, mes: titles.length ? `${mes}\n\n${titles.join('\n\n')}` : mes };
+  }));
 }
 
 async function refreshContextUsage(revision) {
@@ -1531,6 +1592,11 @@ function updateStats(memory = getChatMemory()) {
 function renderLibrary() {
   const container = document.getElementById('smp-library');
   if (!container) return;
+  const sameChat = runtime.libraryChatId === getCurrentChatId();
+  const openIds = new Set(sameChat ? [...container.querySelectorAll('.smp-block[open]')].map(card => card.dataset.blockId) : []);
+  const editingId = runtime.editingBlockId;
+  const drafts = sameChat ? [...container.querySelectorAll('.smp-inline-editor:not([hidden]) [data-field]')].map(input => ({ field: input.dataset.field, value: input.value })) : [];
+  runtime.libraryChatId = getCurrentChatId();
   const memory = getChatMemory();
   syncPinnedFactsEditor();
   const blocks = memory.blocks.filter(block => runtime.libraryTab === 'active' ? block.status === 'active' : block.status !== 'active')
@@ -1564,6 +1630,11 @@ function renderLibrary() {
     editing: block.id === runtime.editingBlockId,
     mergeSelected: runtime.manualRollupIds.has(block.id),
   })).join('');
+  for (const card of container.querySelectorAll('.smp-block')) if (openIds.has(card.dataset.blockId)) card.open = true;
+  if (editingId === runtime.editingBlockId) for (const draft of drafts) {
+    const input = container.querySelector('.smp-inline-editor:not([hidden])')?.querySelector(`[data-field="${draft.field}"]`);
+    if (input) input.value = draft.value;
+  }
   updateBlockActionBar(memory);
   updateManualRollupControls(memory);
   updateStats(memory);
@@ -1749,11 +1820,12 @@ async function renderSettings() {
     }
 
     document.getElementById('smp-compact-now')?.addEventListener('click', async () => {
-      if (runtime.summarizing) return;
+      if (runtime.summarizing || runtime.queued) return;
+      const comparableChat = getCurrentComparableChat();
+      if (!comparableChat.length) { setStatus('idle', msg('Nothing to compact.')); return; }
       runtime.forceCompaction = true;
       setStatus('working', msg('Starting forced compaction.'));
       try {
-        const comparableChat = getCurrentComparableChat();
         await runInterceptor(comparableChat, getMaxPromptTokens(), () => {}, 'manual');
       } catch (error) {
         console.error(LOG_PREFIX, error);
@@ -1983,7 +2055,10 @@ function formatTextMemory(message) {
 
 async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, nativeRequest = false, preparedHistory = undefined) {
   const pending = runtime.pendingPromptMeasurement;
-  if (!pending || runtime.summarizing || runtime.preparingPrompt || eventData?.dryRun || pending.chatId !== String(getCurrentChatId())) return;
+  if (!pending || runtime.summarizing || eventData?.dryRun || pending.chatId !== String(getCurrentChatId())) return;
+  // Every payload needs validation, including concurrent CFG/native variants.
+  while (runtime.preparingPrompt) await runtime.preparingPrompt;
+  if (runtime.pendingPromptMeasurement !== pending) return;
   const original = textMode ? eventData.prompt : eventData.chat;
   if (textMode ? typeof original !== 'string' : !Array.isArray(original)) return;
   // Native prompt-manager dry runs may happen while tokenization or compaction
@@ -2003,20 +2078,25 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
   if (!textMode) pending.nativeMessages = native || [];
   const phase = nativeRequest ? 'transport-preflight' : 'assembled-prompt';
   let inspection = inspectConversation(original, previous, getChatMemory().blocks, textMode);
-  runtime.preparingPrompt = true;
+  let finishPreparation;
+  runtime.preparingPrompt = new Promise(resolve => { finishPreparation = resolve; });
   try {
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (!fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
+    if (JSON.stringify(pending.excluded) !== JSON.stringify(excludedSourceMessages())) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     const count = textMode ? value => countTextTokens(value) : value => countChatPrompt(value, countTokensOpenAIAsync, native || []);
     const total = await count(original) + extraTokens;
     const included = await Promise.all([...matches.keys()].map(index => countTextTokens(previous[index].promptText ?? previous[index].mes)));
+    if (runtime.pendingPromptMeasurement !== pending) return;
     const fixed = Math.max(0, total - included.reduce((a, b) => a + b, 0));
     runtime.fixedPromptTokensByChat.set(pending.chatId, fixed);
     const detail = textMode ? inspection : await inspectChatPrompt(original, previous, getChatMemory().blocks, native || [], count, countTextTokens);
+    if (runtime.pendingPromptMeasurement !== pending) return;
     recordDiagnostic('prompt-measurement', { requestId: pending.requestId, phase, mode: textMode ? 'text' : 'chat', total, fixed, extraTokens, included: matches.size, expected: previous.length,
       environment: diagnosticEnvironment(), inventory: detail.inventory, missing: detail.missing, components: detail.components, excluded: pending.excluded });
     let desired = withPromptRoles(pending.outgoing, preparedHistory);
     const requiredTokens = (await countCoreChat(desired)).reduce((sum, entry) => sum + entry.tokens, 0);
+    if (runtime.pendingPromptMeasurement !== pending) return;
     const missingRaw = missingHistory(desired, locate(original, desired));
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (fixed + requiredTokens >= pending.budget * getSettings().triggerRatio || missingRaw.length) {
@@ -2043,9 +2123,11 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     const actual = await count(result) + extraTokens;
     const finalInspection = textMode ? inspection : await inspectChatPrompt(result, desired, getChatMemory().blocks, native || [], count, countTextTokens);
     const counted = await countCoreChat(desired);
+    if (runtime.pendingPromptMeasurement !== pending) return;
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (actual > pending.budget) throw new LocalizedError(msg`Context exceeds the budget by ${actual - pending.budget} tokens.`);
     if (pending.chatId !== String(getCurrentChatId()) || !fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
+    if (JSON.stringify(pending.excluded) !== JSON.stringify(excludedSourceMessages())) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     if (textMode) eventData.prompt = result;
     else eventData.chat.splice(0, eventData.chat.length, ...result);
     runtime.preparedHistoryByChat.set(pending.chatId, new Map(desired.filter(message => !isSynthetic(message)).map(message => [message.index, {
@@ -2069,13 +2151,14 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
       inventory: pending.inspection.inventory, missing: pending.inspection.missing, components: pending.inspection.components, excluded: pending.excluded,
       memoryMessages: desired.filter(isSynthetic).length, rawMessages: desired.filter(message => !isSynthetic(message)).length });
   } catch (error) {
+    if (runtime.pendingPromptMeasurement !== pending) return;
     setStatus('error', error);
     recordDiagnostic('prompt-blocked', { requestId: pending.requestId, phase, code: error.translationKey || error.name,
       values: error.diagnosticValues, budget: pending.budget, environment: diagnosticEnvironment(),
       inventory: inspection.inventory, missing: inspection.missing, excluded: pending.excluded });
     runtime.pendingPromptMeasurement = null;
     getContext().stopGeneration();
-  } finally { runtime.preparingPrompt = false; }
+  } finally { runtime.preparingPrompt = null; finishPreparation(); schedulePassivePromptRefresh(); }
 }
 
 function captureTextFormatting(data) {
@@ -2087,11 +2170,11 @@ function captureTextFormatting(data) {
 }
 
 async function prepareChatSettings(payload) {
-  if (!runtime.pendingPromptMeasurement?.prepared || runtime.summarizing || !Array.isArray(payload.messages)) return;
+  const pending = runtime.pendingPromptMeasurement;
+  if (!pending?.prepared || runtime.summarizing || !Array.isArray(payload.messages)) return;
   const extra = payload.tools?.length ? await countTextTokens(JSON.stringify(payload.tools)) : 0;
   await prepareFinalPrompt({ chat: payload.messages }, false, extra, true);
-  if (!runtime.pendingPromptMeasurement) return;
-  const pending = runtime.pendingPromptMeasurement;
+  if (runtime.pendingPromptMeasurement !== pending) return;
   recordDiagnostic('chat-request', { requestId: pending.requestId, phase: 'dispatch', delivery: 'handed-to-tavern',
     stream: payload.stream === true, messages: payload.messages.length, maxTokens: payload.max_tokens, tools: payload.tools?.length || 0, toolTokens: extra,
     provider: diagnosticName(payload.chat_completion_source), model: diagnosticName(payload.model), environment: diagnosticEnvironment(),
@@ -2103,9 +2186,10 @@ async function prepareTextRequest(data, dryRun) {
   const field = typeof data?.prompt === 'string' ? 'prompt' : typeof data?.input === 'string' ? 'input' : null;
   if (!field) return;
   const event = { prompt: data[field] };
-  await prepareFinalPrompt(event, true, 0, true);
-  data[field] = event.prompt;
   const pending = runtime.pendingPromptMeasurement;
+  await prepareFinalPrompt(event, true, 0, true);
+  if (runtime.pendingPromptMeasurement !== pending) return;
+  data[field] = event.prompt;
   if (pending?.prepared) recordDiagnostic('text-request', { requestId: pending.requestId, phase: 'dispatch', delivery: 'handed-to-tavern',
     chars: event.prompt.length, inventory: pending.inspection.inventory, environment: diagnosticEnvironment(), excluded: pending.excluded });
 }

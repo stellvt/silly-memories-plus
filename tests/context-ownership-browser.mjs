@@ -75,14 +75,19 @@ try {
       return { id, level, status, children, structured: structured(`MEMORY-${id}`), sourceFrom: from, sourceTo: to, sourceFingerprints: fingerprints, sourceHash: identity.buildSourceHash(fingerprints), sourceTokens: 1000, summaryTokens: 100, createdAt: 1 };
     };
     co.build = async (budget = 8000) => {
-      script.setExternalAbortController(new AbortController());
-      await script.eventSource.emit(script.event_types.GENERATION_STARTED, 'normal', {}, false);
-      const outgoing = c.chat.map((message, index) => ({ ...message, index, extra: { ...message.extra } }));
-      let aborted = false;
-      await sillyMemoriesPlusGenerateInterceptor(outgoing, budget, () => { aborted = true; }, 'normal');
-      if (aborted) return { aborted, chat: [] };
-      const [chat] = await openai.prepareOpenAIMessages({ name2: 'Mira', charDescription: 'PRIVATE-PRESET An archivist.', charPersonality: '', scenario: '', worldInfoBefore: 'PRIVATE-LORE The observatory is locked.', worldInfoAfter: '', bias: '', type: 'normal', quietPrompt: '', extensionPrompts: {}, cyclePrompt: '', systemPromptOverride: '', jailbreakPromptOverride: '', messages: openai.setOpenAIMessages(outgoing), messageExamples: [] }, false);
-      return { aborted, chat };
+      // This calls the native builder directly, outside Generate's foreground
+      // lifecycle. Keep idle dry runs out until this request has finished.
+      document.body.dataset.generating = 'context-ownership-audit';
+      try {
+        script.setExternalAbortController(new AbortController());
+        await script.eventSource.emit(script.event_types.GENERATION_STARTED, 'normal', {}, false);
+        const outgoing = c.chat.map((message, index) => ({ ...message, index, extra: { ...message.extra } }));
+        let aborted = false;
+        await sillyMemoriesPlusGenerateInterceptor(outgoing, budget, () => { aborted = true; }, 'normal');
+        if (aborted) return { aborted, chat: [] };
+        const [chat] = await openai.prepareOpenAIMessages({ name2: 'Mira', charDescription: 'PRIVATE-PRESET An archivist.', charPersonality: '', scenario: '', worldInfoBefore: 'PRIVATE-LORE The observatory is locked.', worldInfoAfter: '', bias: '', type: 'normal', quietPrompt: '', extensionPrompts: {}, cyclePrompt: '', systemPromptOverride: '', jailbreakPromptOverride: '', messages: openai.setOpenAIMessages(outgoing), messageExamples: [] }, false);
+        return { aborted, chat };
+      } finally { delete document.body.dataset.generating; }
     };
     const root = document.getElementById('smp-settings');
     document.body.append(root);
