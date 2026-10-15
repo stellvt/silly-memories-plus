@@ -96,11 +96,15 @@ If context is over budget, switch some blocks back to summary mode, shorten pinn
 
 The preset, active lorebooks, and additional prompts are counted in the assembled request. If the first message contains macros, the remaining prompt is measured during generation. Before sending, the extension checks that memory and recent history are present. Brief notifications announce task starts, completion, and errors.
 
+In Chat Completion, other extensions can change whitespace or remove HTML comments in regular history text. Silly Memories matches messages to the conversation and counts their actual request text. Missing messages, changed content, and ambiguous matches stop the request. Code examples are checked in full.
+
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Debug → Interface language**.
 
 Under **Debug**, **Download logs** saves a JSON file with message indices, block IDs and ranges, token costs by source, missing messages, and invalidation reasons. A request ID links preparation to handoff to SillyTavern's transport; that stage does not confirm provider receipt. The file includes the model and tokenizer, but no conversation text, summaries, prompts, or connection keys.
 
 Enable **Debug logging**, repeat generation, and download the logs. Events named `text-trace` show text lengths and hashes before and after history processing, macro expansion, prompt assembly, and transport preflight. Differences include the stage, added and removed character counts, and escaped whitespace. Non-whitespace text fragments are not recorded. Inferred matches and ambiguous candidates are marked separately and do not affect request validation. The setting also enables detailed browser console output.
+
+In the context inventory, `matchBasis` identifies an exact match (`exact`) or a match with formatting changes (`formatting-equivalent`). `deltaChars` records the change in message length.
 
 ## Custom prompts
 

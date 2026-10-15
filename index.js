@@ -67,7 +67,7 @@ import {
   renderRegenerationComparison,
 } from './lib/ui.mjs';
 import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
-import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory } from './lib/prompt.mjs';
+import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory, resolveChatConversation, unverifiedChatHistory } from './lib/prompt.mjs';
 import { installNativeContextManagement } from './lib/native-context.mjs';
 import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, inspectBlockSource, reconcileMemorySources } from './lib/source-identity.mjs';
 import { diagnosticError, recordDiagnostic, exportDiagnostics, nextDiagnosticRequest } from './lib/diagnostics.mjs';
@@ -1509,8 +1509,9 @@ async function measurePassivePrompt(data, dryRun) {
   // Dry runs omit extension interceptors. Subtract only raw text actually present
   // in the native prompt; clipped history must not become fixed prompt overhead.
   const processed = await prepareStoredHistory(snapshot.source);
-  const source = withPromptRoles(processed, preparedHistory);
   const chatMode = snapshot.api === 'openai';
+  const formatted = withPromptRoles(processed, preparedHistory);
+  const source = chatMode ? resolveChatConversation(prompt, formatted) : formatted;
   const matches = chatMode ? locateChatConversation(prompt, source) : locateTextConversation(prompt, source);
   const native = chatMode ? promptManager?.messages?.flatten?.() || [] : [];
   const total = chatMode ? await countChatPrompt(prompt, countTokensOpenAIAsync, native) : await countTextTokens(prompt);
@@ -1523,6 +1524,21 @@ async function measurePassivePrompt(data, dryRun) {
     if (runtime.passivePromptDirty) schedulePassivePromptRefresh();
     return;
   }
+  if (getSettings().debug) {
+    recordDiagnostic('text-trace', { requestId: snapshot.requestId, phase: 'passive',
+      fromStage: 'stored-history', toStage: 'prompt-processing', messages: traceIndexedText(snapshot.source, processed) });
+    if (chatMode) tracePromptText(snapshot.requestId, 'passive', processed, source, preparedHistory, native, prompt);
+  }
+  const unverified = chatMode ? unverifiedChatHistory(prompt, source) : [];
+  if (unverified.length) {
+    runtime.fixedPromptTokensByChat.delete(String(snapshot.chatId));
+    runtime.preparedHistoryByChat.delete(String(snapshot.chatId));
+    runtime.passivePromptDirty = false;
+    recordDiagnostic('prompt-estimate-rejected', { requestId: snapshot.requestId, phase: 'passive',
+      environment: diagnosticEnvironment(), messages: unverified });
+    scheduleContextRefresh();
+    return;
+  }
   const fixed = Math.max(0, total - included.reduce((sum, value) => sum + value, 0));
   runtime.preparedHistoryByChat.set(String(snapshot.chatId), new Map(source.map(message => [message.index, {
     hash: fingerprintMessage(snapshot.source.find(item => item.index === message.index)).hash, promptText: message.promptText ?? message.formatted ?? message.mes,
@@ -1530,11 +1546,6 @@ async function measurePassivePrompt(data, dryRun) {
   runtime.fixedPromptTokensByChat.set(String(snapshot.chatId), fixed);
   runtime.contextBudgetsByChat.set(String(snapshot.chatId), getMaxPromptTokens());
   runtime.passivePromptDirty = false;
-  if (getSettings().debug) {
-    recordDiagnostic('text-trace', { requestId: snapshot.requestId, phase: 'passive',
-      fromStage: 'stored-history', toStage: 'prompt-processing', messages: traceIndexedText(snapshot.source, processed) });
-    if (chatMode) tracePromptText(snapshot.requestId, 'passive', processed, source, preparedHistory, native, prompt);
-  }
   recordDiagnostic('prompt-estimate', { requestId: snapshot.requestId, phase: 'passive', mode: chatMode ? 'chat' : 'text', total, fixed, included: matches.size, expected: source.length,
     environment: diagnosticEnvironment(), ...inspection, matches: undefined,
     excluded: snapshot.source.filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' })) });
@@ -2091,12 +2102,14 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
   preparedHistory = pending.preparedHistory ?? preparedHistory ?? nativeContext.snapshot();
   pending.preparedHistory = preparedHistory;
   const locate = textMode ? locateTextConversation : locateChatConversation;
-  let previous = withPromptRoles(pending.outgoing, preparedHistory);
+  const resolve = conversation => textMode ? conversation : resolveChatConversation(original, conversation);
+  let previous = resolve(withPromptRoles(pending.outgoing, preparedHistory));
   let matches = locate(original, previous);
   // CFG and native builder variants can still carry the original frontier
   // after another variant has already completed a late compaction.
-  const initialMatches = locate(original, withPromptRoles(pending.initialOutgoing, preparedHistory));
-  if (initialMatches.size > matches.size) { previous = withPromptRoles(pending.initialOutgoing, preparedHistory); matches = initialMatches; }
+  const initial = resolve(withPromptRoles(pending.initialOutgoing, preparedHistory));
+  const initialMatches = locate(original, initial);
+  if (initialMatches.size > matches.size) { previous = initial; matches = initialMatches; }
   // Quiet generation uses the same event, but not the native chat builder.
   const native = !textMode && (pending.nativeMessages ?? promptManager?.messages?.flatten?.().filter(message => message.content || message.tool_calls));
   if (!matches.size && !nativeRequest && !(native && JSON.stringify(native.map(message => [message.role, message.content])) === JSON.stringify(original.map(message => [message.role, message.content])))) return;
@@ -2120,20 +2133,26 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     if (runtime.pendingPromptMeasurement !== pending) return;
     recordDiagnostic('prompt-measurement', { requestId: pending.requestId, phase, mode: textMode ? 'text' : 'chat', total, fixed, extraTokens, included: matches.size, expected: previous.length,
       environment: diagnosticEnvironment(), inventory: detail.inventory, missing: detail.missing, components: detail.components, excluded: pending.excluded });
-    let desired = withPromptRoles(pending.outgoing, preparedHistory);
+    let desired = resolve(withPromptRoles(pending.outgoing, preparedHistory));
     const requiredTokens = (await countCoreChat(desired)).reduce((sum, entry) => sum + entry.tokens, 0);
     if (runtime.pendingPromptMeasurement !== pending) return;
     const missingRaw = missingHistory(desired, locate(original, desired));
+    const unverified = textMode ? [] : unverifiedChatHistory(original, desired);
+    if (unverified.length) {
+      inspection.missing = inspection.missing.map(item => ({ ...item, reason: unverified.find(source => source.index === item.index)?.reason || item.reason }));
+      recordDiagnostic('history-match-rejected', { requestId: pending.requestId, phase, messages: unverified });
+      throw new LocalizedError(msg('Memory or recent history is missing from the prompt. Check the chat history marker and prompt settings.'));
+    }
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (fixed + requiredTokens >= pending.budget * getSettings().triggerRatio || missingRaw.length) {
       // Plan and summarize the same expansions that are present in this request.
       // Stored fingerprints remain attached to the original chat, not this text.
-      const source = withPromptRoles(pending.source, preparedHistory).map(message => ({ ...message, mes: message.promptText ?? message.mes }));
+      const source = resolve(withPromptRoles(pending.source, preparedHistory)).map(message => ({ ...message, mes: message.promptText ?? message.mes }));
       let aborted = false;
       runtime.forceCompaction = missingRaw.length > 0;
       await runInterceptor(source, pending.budget, () => { aborted = true; }, 'prepared', fixed);
       if (aborted) throw new LocalizedError(runtime.lastStatus.text);
-      desired = withPromptRoles(source, preparedHistory);
+      desired = resolve(withPromptRoles(source, preparedHistory));
       pending.memorySnapshot = memoryPromptSnapshot();
     }
     const present = locate(original, desired);

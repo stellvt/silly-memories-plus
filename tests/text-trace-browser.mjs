@@ -80,7 +80,7 @@ try {
   });
   const edgeRows = edge.events.filter(e => e.type === 'text-trace').flatMap(e => e.messages || []);
   check('four-newlines-identified-at-assembled-stage', edgeRows.some(row => row.index === 2 && row.changes?.some(c => c.to === 'assembled-prompt' && c.kind === 'edge-whitespace' && c.deltaChars === -4 && c.removed?.whitespace === '\\n\\n\\n\\n' && c.edges.before.leading.whitespace === '\\n\\n' && c.edges.before.trailing.whitespace === '\\n\\n')), edgeRows);
-  check('diagnostics-do-not-relax-missing-history-guard', edge.events.some(e => e.type === 'prompt-blocked'));
+  check('formatting-equivalence-keeps-history-validation', !edge.events.some(e => e.type === 'prompt-blocked'));
   const input = await page.evaluate(async () => { await tt.reset(); tt.prepareMode = 'input-trim'; return tt.build(); });
   check('native-input-trim-distinguished-from-final-event', input.events.filter(e => e.type === 'text-trace').flatMap(e => e.messages || []).some(row => row.index === 2 && row.changes?.some(c => c.to === 'native-input' && c.kind === 'edge-whitespace')));
   const macro = await page.evaluate(async () => {
