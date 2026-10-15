@@ -83,7 +83,7 @@ try {
     return { managed: JSON.stringify(managed).includes('OLDEST-CONTENT'), unmanaged: JSON.stringify(unmanaged).includes('OLDEST-CONTENT'), label, restoredLabel, settings };
   });
   check('native-builder-keeps-old-history-under-pressure', native.managed && !native.unmanaged, native);
-  check('native-token-tab-shows-manager-and-restores-on-disable', native.label === 'Managed by Silly Memories' && native.restoredLabel.includes('Total Tokens'), native);
+  check('native-token-tab-shows-manager-and-restores-on-disable', native.label === 'Silly' && native.restoredLabel.includes('Total Tokens'), native);
   check('real-context-and-output-settings-are-unchanged', native.settings === '{"context":1024,"output":512}');
   const recovery = await page.evaluate(async () => {
     const structured = { narrative: 'Original saved memory', relationships: [], importantItems: [], characterStates: [], locations: [], commitments: [], openThreads: [], resolvedThreads: [], worldFacts: [], exactTerms: [] };

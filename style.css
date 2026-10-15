@@ -537,8 +537,3 @@
 #smp-settings #smp-facts-state {
   align-self: center;
 }
-
-#completion_prompt_manager #completion_prompt_manager_list .smp-managed-history .prompt_manager_prompt_tokens {
-  grid-column: 1 / -1;
-  overflow-wrap: anywhere;
-}

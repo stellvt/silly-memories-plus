@@ -209,6 +209,8 @@ try {
     const manager = co.openai.promptManager;
     await manager.renderPromptManager(); await manager.renderPromptManagerListItems();
     const active = manager.containerElement.querySelector('[data-pm-identifier="chatHistory"] .prompt_manager_prompt_tokens')?.textContent;
+    const header = manager.containerElement.querySelector('.completion_prompt_manager_header')?.lastElementChild.textContent;
+    const nativeCount = manager.containerElement.querySelector('[data-pm-identifier="chatHistory"] .prompt_manager_prompt_tokens')?.dataset.pmTokens;
     co.c.extensionSettings.silly_memories_plus.enabled = false;
     await manager.renderPromptManager(); await manager.renderPromptManagerListItems();
     const disabled = manager.containerElement.querySelector('[data-pm-identifier="chatHistory"] .prompt_manager_prompt_tokens')?.textContent;
@@ -217,10 +219,10 @@ try {
     document.body.append(manager.containerElement);
     manager.containerElement.style.cssText = 'display:block;position:fixed;inset:0 auto auto 0;width:320px;background:#202225;z-index:100000';
     const counter = manager.containerElement.querySelector('[data-pm-identifier="chatHistory"] .prompt_manager_prompt_tokens');
-    return { active, disabled, overflow: counter.scrollWidth > counter.clientWidth + 1 };
+    return { active, disabled, header, nativeCount, overflow: counter.scrollWidth > counter.clientWidth + 1 };
   });
-  await check('history-row-label-is-managed-and-restores-on-disable', labels.active === 'Managed by Silly Memories' && labels.disabled !== labels.active, labels);
-  await check('managed-history-label-fits-320px', !labels.overflow, labels);
+  await check('manager-label-is-header-only-with-native-history-counter', labels.header === 'Silly' && labels.nativeCount !== undefined && !labels.active.includes('Silly') && !labels.disabled.includes('Silly'), labels);
+  await check('native-history-counter-fits-320px', !labels.overflow, labels);
   await page.locator('[data-pm-identifier="chatHistory"]').screenshot({ path: resolve(directory, 'managed-history-row.png') });
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'context-ui.png') });
   assert.ok(results.every(result => result.passed), 'One or more context ownership checks failed');
