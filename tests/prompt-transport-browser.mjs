@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 
 // Transport failures: missing memory on the wire, modified streaming/schema or
 // response limits, duplicated injections, late tools/lore overflow, disabled
-// history markers, raw-exposed blocks, cancelled/changed sources, and log leaks.
+// history markers, raw-exposed blocks, cancelled/changed sources, log leaks,
+// wrong summary reasoning effort in either request path, and chat effort leakage.
 const require = createRequire(import.meta.url);
 const { chromium } = require(resolve(process.env.CODEX_NODE_MODULES, 'playwright'));
 const directory = process.env.SMP_ARTIFACT_DIR;
@@ -30,10 +31,15 @@ try {
     c.characters.push({ name: 'Transport test', avatar: 'none', chat: 'transport-test', data: {} });
     script.setCharacterId(c.characters.length - 1);
     script.changeMainAPI('openai');
-    Object.assign(openai.oai_settings, { chat_completion_source: 'openai', openai_model: 'gpt-4o-mini', stream_openai: true, openai_max_context: 5512, openai_max_tokens: 512, squash_system_messages: false });
+    Object.assign(openai.oai_settings, { chat_completion_source: 'openai', openai_model: 'gpt-4o-mini', stream_openai: true, openai_max_context: 5512, openai_max_tokens: 512, squash_system_messages: false, reasoning_effort: 'medium' });
+    const summaryRequests = [];
     service.getProfile = () => ({ id: 'transport-test' });
     service.validateProfile = () => ({ selected: 'openai' });
-    service.sendRequest = async () => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(structured('Mira recovered the key.')) } }] });
+    service.sendRequest = async (profileId, messages, maxTokens, options, payload) => {
+      summaryRequests.push({ path: 'profile', effort: payload.reasoning_effort });
+      if (payload.reasoning_effort !== 'low' || payload.include_reasoning !== false || options.stream !== false) throw new Error('Invalid profile summarizer reasoning settings');
+      return { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(structured('Mira recovered the key.')) } }] };
+    };
     const results = [];
     const nativeFetch = globalThis.fetch;
     let payloads = [];
@@ -43,7 +49,11 @@ try {
       if (!String(url).includes('/api/backends/chat-completions/generate')) return nativeFetch(url, options);
       options.signal?.throwIfAborted();
       const payload = JSON.parse(options.body);
-      if (payload.json_schema) return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(structured('Mira recovered the key.')) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      if (payload.json_schema) {
+        summaryRequests.push({ path: 'main-api', effort: payload.reasoning_effort });
+        if (payload.reasoning_effort !== 'low' || payload.include_reasoning !== false || payload.stream !== false) throw new Error('Invalid main-API summarizer reasoning settings');
+        return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(structured('Mira recovered the key.')) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
       payloads.push(payload);
       const encoder = new TextEncoder();
       return new Response(new ReadableStream({ start(controller) {
@@ -98,9 +108,13 @@ try {
         const body = JSON.stringify(sent?.messages || []);
         const invalid = ['too-large-preset', 'disabled-history', 'source-edited', 'memory-edited', 'facts-edited'].includes(scenario);
         results.push({ scenario, aborted, stopped, requests: payloads.length, output,
-          passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && !sent.json_schema && body.includes('Mira holds the key.') && c.chat.slice(-2).every(message => body.includes(message.mes)) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
+          passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && sent.reasoning_effort !== 'low' && openai.oai_settings.reasoning_effort === 'medium' && !sent.json_schema && body.includes('Mira holds the key.') && c.chat.slice(-2).every(message => body.includes(message.mes)) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
       }
     } finally { globalThis.fetch = nativeFetch; }
+    for (const path of ['profile', 'main-api']) {
+      const requests = summaryRequests.filter(request => request.path === path);
+      results.push({ scenario: `low-reasoning-${path}`, requests: requests.length, passed: requests.length > 0 && requests.every(request => request.effort === 'low') });
+    }
     return results;
   });
   for (const result of results) assert.ok(result.passed, JSON.stringify(result));

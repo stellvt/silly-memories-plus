@@ -458,7 +458,7 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
         signal: runtime.abortController?.signal || null,
       },
       {
-        reasoning_effort: 'min',
+        reasoning_effort: 'low',
         include_reasoning: false,
         json_schema: SUMMARY_JSON_SCHEMA,
       },
@@ -469,7 +469,7 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
   runtime.fallbackSummaryActive = true;
   const overrideFallbackPayload = payload => {
     payload.max_tokens = requestMaxTokens;
-    payload.reasoning_effort = 'min';
+    payload.reasoning_effort = 'low';
     payload.include_reasoning = false;
     payload.json_schema = SUMMARY_JSON_SCHEMA;
   };
