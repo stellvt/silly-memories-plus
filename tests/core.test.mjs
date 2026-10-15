@@ -492,7 +492,7 @@ test('rollup retires children and becomes the active frontier', () => {
   }, ['a', 'b']);
   assert.deepEqual(getActiveBlocks(memory).map(block => block.id), ['ab']);
   assert.equal(getCoveredThrough(memory.blocks), 19);
-  assert.deepEqual(memory.blocks.find(block => block.id === 'a').sourceFingerprints, []);
+  assert.deepEqual(memory.blocks.find(block => block.id === 'a').sourceFingerprints, [{ index: 0, id: '', hash: 'a' }]);
 });
 
 test('staged fifteenth block and rollup never mutate the last saved memory', () => {

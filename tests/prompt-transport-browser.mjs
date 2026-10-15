@@ -21,6 +21,10 @@ try {
   await page.waitForFunction(() => typeof sillyMemoriesPlusGenerateInterceptor === 'function');
   await page.waitForSelector('#smp-settings', { state: 'attached' });
   await page.locator('#preloader').waitFor({ state: 'hidden' });
+  await page.waitForFunction(async () => {
+    const { loader } = await import('/scripts/action-loader.js');
+    return SillyTavern.getContext().characters.length > 0 && !loader.active().some(handle => handle.slug === 'app-init');
+  });
   results = await page.evaluate(async () => {
     const script = await import('/script.js');
     const openai = await import('/scripts/openai.js');
@@ -46,7 +50,7 @@ try {
     let stopped = 0;
     script.eventSource.on(script.event_types.GENERATION_STOPPED, () => stopped++);
     globalThis.fetch = async (url, options) => {
-      if (!String(url).includes('/api/backends/chat-completions/generate')) return nativeFetch(url, options);
+      if (!String(url).includes('/api/backends/chat-completions/generate')) return nativeFetch.call(globalThis, url, options);
       options.signal?.throwIfAborted();
       const payload = JSON.parse(options.body);
       if (payload.json_schema) {
@@ -85,7 +89,7 @@ try {
         const history = order.find(item => item.identifier === 'chatHistory');
         const wasEnabled = history?.enabled;
         if (scenario === 'disabled-history' && history) history.enabled = false;
-        const messages = outgoing.map(message => ({ role: message.extra?.type ? 'system' : message.is_user ? 'user' : 'assistant', content: message.mes, name: 'Mira' })).reverse();
+        const messages = openai.setOpenAIMessages(outgoing);
         let [chat] = await openai.prepareOpenAIMessages({ name2: 'Mira', charDescription: ' header'.repeat(scenario === 'too-large-preset' ? 4700 : 800), charPersonality: '', scenario: '', worldInfoBefore: ' lore'.repeat(800), worldInfoAfter: '', bias: '', type: 'normal', quietPrompt: '', extensionPrompts: {}, cyclePrompt: '', messages, messageExamples: [] }, false);
         if (history) history.enabled = wasEnabled;
         if (scenario === 'late-prompt') chat.unshift({ role: 'system', content: ' late-lore'.repeat(800) });
@@ -107,7 +111,7 @@ try {
         const sent = payloads[0];
         const body = JSON.stringify(sent?.messages || []);
         const invalid = ['too-large-preset', 'disabled-history', 'source-edited', 'memory-edited', 'facts-edited'].includes(scenario);
-        results.push({ scenario, aborted, stopped, requests: payloads.length, output,
+        results.push({ scenario, aborted, stopped, requests: payloads.length, output, checks: { stream: sent?.stream, maxTokens: sent?.max_tokens, mainEffort: openai.oai_settings.reasoning_effort, sentEffort: sent?.reasoning_effort, schema: Boolean(sent?.json_schema), facts: body.includes('Mira holds the key.'), tail: c.chat.slice(-2).every(message => body.includes(message.mes)) },
           passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && sent.reasoning_effort !== 'low' && openai.oai_settings.reasoning_effort === 'medium' && !sent.json_schema && body.includes('Mira holds the key.') && c.chat.slice(-2).every(message => body.includes(message.mes)) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
       }
     } finally { globalThis.fetch = nativeFetch; }

@@ -23,7 +23,7 @@ import { appendFileContent } from '../../../chats.js';
 import { isExecutingCommandsFromChatInput } from '../../../slash-commands.js';
 import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { system_message_types } from '../../../system-messages.js';
-import { promptManager } from '../../../openai.js';
+import { ChatCompletion, promptManager, setOpenAIMessages } from '../../../openai.js';
 import { ConnectionManagerRequestService } from '../../shared.js';
 import {
   buildCompactionPlan,
@@ -65,6 +65,8 @@ import {
 } from './lib/ui.mjs';
 import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
 import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory } from './lib/prompt.mjs';
+import { installNativeContextManagement } from './lib/native-context.mjs';
+import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, reconcileMemorySources } from './lib/source-identity.mjs';
 import { diagnosticError, recordDiagnostic, exportDiagnostics } from './lib/diagnostics.mjs';
 import { getCurrentLocale, translate as nativeTranslate } from '../../../i18n.js';
 import { applyTranslations, displayText, initializeI18n, LocalizedError, message as msg, setLanguage, t, translate } from './lib/i18n.mjs';
@@ -85,6 +87,7 @@ const runtime = {
   cancelRequested: false,
   activeCompactionChatId: null,
   fixedPromptTokensByChat: new Map(),
+  preparedHistoryByChat: new Map(),
   pendingPromptMeasurement: null,
   preparingPrompt: false,
   liveGeneration: false,
@@ -106,6 +109,7 @@ const runtime = {
   factsEditorChatId: null,
   factsEditorValue: '',
   contextUsage: null,
+  generationType: null,
 };
 let settingsInitialized = false;
 
@@ -262,40 +266,6 @@ async function savePinnedFacts() {
   setStatus('success', facts ? msg('Pinned facts saved for this chat.') : msg('Pinned facts cleared.'));
 }
 
-function fastHash(value) {
-  const source = String(value ?? '');
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < source.length; index++) {
-    hash ^= source.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
-}
-
-function getMessageIdentity(message) {
-  return String(message?.id ?? message?.extra?.sillyFriends?.clientMsgId ?? '');
-}
-
-function fingerprintMessage(message) {
-  const index = Math.max(0, Number(message?.index) || 0);
-  const id = getMessageIdentity(message);
-  const role = message?.is_user ? 'user' : 'assistant';
-  const content = String(message?.mes || '');
-  return { index, id, hash: fastHash(`${role}\u0000${message?.name || ''}\u0000${content}`) };
-}
-
-function buildSourceHash(fingerprints) {
-  return fastHash(fingerprints.map(item => `${item.index}:${item.id}:${item.hash}`).join('|'));
-}
-
-function findCurrentMessage(coreChat, fingerprint) {
-  if (fingerprint.id) {
-    const byId = coreChat.find(message => getMessageIdentity(message) === fingerprint.id);
-    if (byId) return byId;
-  }
-  return coreChat.find(message => Number(message?.index) === Number(fingerprint.index));
-}
-
 function getCurrentComparableChat() {
   const context = getContext();
   const chat = Array.isArray(context?.chat) ? context.chat : [];
@@ -318,54 +288,30 @@ function memoryPromptSnapshot() {
 }
 
 function activeMemoryIsValid(rawChat, memory) {
-  const active = getActiveBlocks(memory);
-  for (const block of active) {
-    for (const fingerprint of block.sourceFingerprints || []) {
-      const rawMessage = findCurrentMessage(rawChat, fingerprint);
-      if (!rawMessage || fingerprintMessage(rawMessage).hash !== fingerprint.hash) return false;
-    }
+  return getActiveBlocks(memory).every(block =>
+    !hasSourceIdentity(block) || blockSourceMatches(block, rawChat));
+}
+
+async function reconcileChatMemory(memory, reason = null) {
+  const chatId = getCurrentChatId();
+  const result = reconcileMemorySources(memory, getCurrentComparableChat());
+  if (result.changedIds.length || result.recoveredIds.length) {
+    await setChatMemory(result.memory, true, chatId);
+    recordDiagnostic('memory-reconciled', { invalidated: result.changedIds.length, recovered: result.recoveredIds.length });
+    if (result.changedIds.length && reason) setStatus('warning', reason);
   }
-  return true;
+  return result.memory;
 }
 
 async function invalidateActiveMemory(memory, reason) {
-  let changed = false;
-  for (const block of memory.blocks) {
-    if (block.status === 'active') {
-      block.status = 'stale';
-      block.sourceFingerprints = [];
-      changed = true;
-    }
-  }
-  if (changed) {
-    await setChatMemory(memory);
-    setStatus('warning', reason);
-  }
-  return changed;
-}
-
-async function repairActiveFrontier(memory) {
-  const active = getActiveBlocks(memory);
-  const frontierIds = new Set(getActiveFrontier(active).blocks.map(block => block.id));
-  const orphaned = active.filter(block => !frontierIds.has(block.id));
-  if (!orphaned.length) return memory;
-  for (const block of memory.blocks) {
-    if (orphaned.some(orphan => orphan.id === block.id)) {
-      block.status = 'stale';
-      block.sourceFingerprints = [];
-    }
-  }
-  const message = msg`Marked ${orphaned.length} non-contiguous active block(s) stale.`;
-  await setChatMemory(memory);
-  setStatus('warning', message);
-  return memory;
+  await reconcileChatMemory(memory, reason);
 }
 
 async function countCoreChat(coreChat) {
   const counts = await Promise.all(coreChat.map(async message => ({
     message,
     index: Math.max(0, Number(message?.index) || 0),
-    tokens: await getTokenCountAsync(String(message?.mes || ''), 0),
+    tokens: await getTokenCountAsync(String(message?.promptText ?? message?.mes ?? ''), 0),
   })));
   return counts;
 }
@@ -531,12 +477,12 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
 async function createBlock({ level, sourceEntries = [], childBlocks = [], targetTokens, instruction = '' }) {
   const isRaw = level === 1;
   const settings = getSettings();
-  const currentChat = isRaw ? getCurrentComparableChat() : [];
+  const currentChat = getCurrentComparableChat();
   const fingerprints = isRaw
     ? sourceEntries.map(entry => fingerprintMessage(findCurrentMessage(currentChat, {
       index: entry.index, id: getMessageIdentity(entry.message),
     }) || entry.message))
-    : childBlocks.flatMap(block => block.sourceFingerprints || []);
+    : childBlocks.flatMap(block => getBlockRangeMessages(block).map(fingerprintMessage));
   const stage = isRaw ? 'raw' : 'rollup';
   const countTokens = value => getTokenCountAsync(value, 0);
   const { sourceBudget: inputBudget } = await getSummarySourceBudget({
@@ -851,7 +797,6 @@ async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
       refreshBlockSourceIdentity(block);
     } catch {
       block.status = 'stale';
-      block.sourceFingerprints = [];
       if (!preview.staleIds.includes(id)) preview.staleIds.push(id);
     }
   }
@@ -939,19 +884,9 @@ async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
       refreshBlockSourceIdentity(reactivated);
     } catch {
       reactivated.status = 'stale';
-      reactivated.sourceFingerprints = [];
       if (!result.staleIds.includes(id)) result.staleIds.push(id);
     }
   }
-  const frontierIds = new Set(getActiveFrontier(result.memory).blocks.map(item => item.id));
-  for (const candidate of result.memory.blocks) {
-    if (candidate.status === 'active' && !frontierIds.has(candidate.id)) {
-      candidate.status = 'stale';
-      candidate.sourceFingerprints = [];
-      if (!result.staleIds.includes(candidate.id)) result.staleIds.push(candidate.id);
-    }
-  }
-
   if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before edited block commit'));
   runtime.editingBlockId = null;
   await setChatMemory(result.memory, true, chatId);
@@ -1212,13 +1147,13 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
   let plan;
   let pinnedTokens = 0;
   try {
-    memory = getChatMemory();
+    memory = settings.enabled ? await reconcileChatMemory(getChatMemory()) : getChatMemory();
     if (settings.enabled && !activeMemoryIsValid(getCurrentComparableChat(), memory)) {
       await invalidateActiveMemory(memory, msg('Memory source changed; active blocks marked stale.'));
       memory = getChatMemory();
     }
     if (settings.enabled) {
-      memory = await repairActiveFrontier(memory);
+      // A gap controls coverage; it is not evidence that later sources changed.
       memory = await refreshActiveBlockTokenCounts(memory, settings);
     }
     const facts = renderPinnedFacts(memory.pinnedFacts);
@@ -1417,6 +1352,8 @@ function schedulePassivePromptRefresh() {
 
 function beginPromptMeasurement(type, options, dryRun) {
   runtime.passivePromptMeasurement = null;
+  runtime.generationType = type;
+  nativeContext.reset();
   if (!dryRun) return;
   if (runtime.liveGeneration || runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
   runtime.passivePromptMeasurement = {
@@ -1432,6 +1369,7 @@ async function measurePassivePrompt(data, dryRun) {
   if (!snapshot || snapshot.chatId == null || runtime.liveGeneration || runtime.summarizing) return;
   const prompt = typeof data?.input === 'string' ? data.input : data?.prompt;
   if (snapshot.api === 'openai' ? !Array.isArray(prompt) : typeof prompt !== 'string') return;
+  const preparedHistory = nativeContext.snapshot();
   // Dry runs omit extension interceptors. Subtract only raw text actually present
   // in the native prompt; clipped history must not become fixed prompt overhead.
   const source = withPromptRoles(await Promise.all(snapshot.source.map(async (message, index) => {
@@ -1441,12 +1379,12 @@ async function measurePassivePrompt(data, dryRun) {
     const titles = [message.extra?.append_title && message.extra?.title,
       ...(message.extra?.media || []).filter(media => media.append_title).map(media => media.title)].filter(Boolean);
     return { ...message, mes: titles.length ? `${mes}\n\n${titles.join('\n\n')}` : mes };
-  })));
+  })), preparedHistory);
   const chatMode = snapshot.api === 'openai';
   const matches = chatMode ? locateChatConversation(prompt, source) : locateTextConversation(prompt, source);
   const native = chatMode ? promptManager?.messages?.flatten?.() || [] : [];
   const total = chatMode ? await countChatPrompt(prompt, countTokensOpenAIAsync, native) : await getTokenCountAsync(prompt, 0);
-  const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(source[index].mes, 0)));
+  const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(source[index].promptText ?? source[index].mes, 0)));
   if (snapshot.chatId !== getCurrentChatId() || snapshot.revision !== runtime.overheadRevision
     || snapshot.api !== main_api || runtime.liveGeneration || runtime.summarizing
     || snapshot.source.length !== getCurrentComparableChat().length
@@ -1455,6 +1393,9 @@ async function measurePassivePrompt(data, dryRun) {
     return;
   }
   const fixed = Math.max(0, total - included.reduce((sum, value) => sum + value, 0));
+  runtime.preparedHistoryByChat.set(String(snapshot.chatId), new Map(snapshot.source.map((message, index) => [message.index, {
+    hash: fingerprintMessage(message).hash, promptText: source[index].promptText ?? source[index].formatted ?? source[index].mes,
+  }])));
   runtime.fixedPromptTokensByChat.set(String(snapshot.chatId), fixed);
   runtime.contextBudgetsByChat.set(String(snapshot.chatId), getMaxPromptTokens());
   runtime.passivePromptDirty = false;
@@ -1477,7 +1418,11 @@ async function refreshContextUsage(revision) {
   const memory = getChatMemory();
   const valid = settings.enabled && activeMemoryIsValid(chat, memory);
   const messages = valid ? rewriteConversationWithMemory(chat, memory, text => makeSyntheticMemoryMessage(text, settings), settings.includeStructuredMemory).messages : chat;
-  const counted = await countCoreChat(messages);
+  const preparedHistory = runtime.preparedHistoryByChat.get(String(chatId));
+  const counted = await countCoreChat(messages.map(message => {
+    const prepared = !isSynthetic(message) && preparedHistory?.get(message.index);
+    return prepared?.hash === fingerprintMessage(message).hash ? { ...message, promptText: prepared.promptText } : message;
+  }));
   const factsText = renderPinnedFacts(memory.pinnedFacts);
   const facts = factsText ? await getTokenCountAsync(factsText, 0) : 0;
   // Measurements from a previous chat or an earlier refresh cannot update the UI.
@@ -1913,7 +1858,7 @@ function refreshLanguage() {
   setStatus(runtime.lastStatus.kind, runtime.lastStatus.text);
 }
 
-function onChatChanged() {
+async function onChatChanged() {
   ++runtime.overheadRevision;
   runtime.passivePromptDirty = true;
   recordDiagnostic('chat-changed');
@@ -1938,11 +1883,16 @@ function onChatChanged() {
   closeRegeneration();
   runtime.manualRollupIds.clear();
   closeBlockEditor();
+  await reconcileChatMemory(getChatMemory());
   renderLibrary();
   setStatus('idle', msg('Ready for this chat.'));
 }
 
-function withPromptRoles(messages) {
+function withPromptRoles(messages, preparedHistory = undefined) {
+  if (main_api === 'openai') {
+    return nativeContext.format(messages, message => setOpenAIMessages([message])[0]
+      || { role: message.is_user ? 'user' : 'assistant', content: message.mes }, preparedHistory);
+  }
   return messages.map(message => ({ ...message, promptRole: message.extra?.type === system_message_types.NARRATOR ? 'system' : message.is_user ? 'user' : 'assistant' }));
 }
 
@@ -1955,18 +1905,22 @@ function formatTextMemory(message) {
   return narrator ? `${message.mes}\n` : `${message.name}: ${message.mes}\n`;
 }
 
-async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, nativeRequest = false) {
+async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, nativeRequest = false, preparedHistory = undefined) {
   const pending = runtime.pendingPromptMeasurement;
   if (!pending || runtime.summarizing || runtime.preparingPrompt || eventData?.dryRun || pending.chatId !== String(getCurrentChatId())) return;
   const original = textMode ? eventData.prompt : eventData.chat;
   if (textMode ? typeof original !== 'string' : !Array.isArray(original)) return;
+  // Native prompt-manager dry runs may happen while tokenization or compaction
+  // awaits I/O. Keep this request's exact expansions through the transport guard.
+  preparedHistory ??= pending.preparedHistory ?? nativeContext.snapshot();
+  pending.preparedHistory = preparedHistory;
   const locate = textMode ? locateTextConversation : locateChatConversation;
-  let previous = pending.outgoing;
+  let previous = withPromptRoles(pending.outgoing, preparedHistory);
   let matches = locate(original, previous);
   // CFG and native builder variants can still carry the original frontier
   // after another variant has already completed a late compaction.
-  const initialMatches = locate(original, pending.initialOutgoing);
-  if (initialMatches.size > matches.size) { previous = pending.initialOutgoing; matches = initialMatches; }
+  const initialMatches = locate(original, withPromptRoles(pending.initialOutgoing, preparedHistory));
+  if (initialMatches.size > matches.size) { previous = withPromptRoles(pending.initialOutgoing, preparedHistory); matches = initialMatches; }
   // Quiet generation uses the same event, but not the native chat builder.
   const native = !textMode && promptManager?.messages?.flatten?.().filter(message => message.content || message.tool_calls);
   if (!matches.size && !nativeRequest && !(native && JSON.stringify(native.map(message => [message.role, message.content])) === JSON.stringify(original.map(message => [message.role, message.content])))) return;
@@ -1976,11 +1930,11 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     if (!fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     const count = textMode ? value => getTokenCountAsync(value, 0) : value => countChatPrompt(value, countTokensOpenAIAsync, native || []);
     const total = await count(original) + extraTokens;
-    const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(previous[index].mes, 0)));
+    const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(previous[index].promptText ?? previous[index].mes, 0)));
     const fixed = Math.max(0, total - included.reduce((a, b) => a + b, 0));
     runtime.fixedPromptTokensByChat.set(pending.chatId, fixed);
     recordDiagnostic('prompt-measurement', { mode: textMode ? 'text' : 'chat', total, fixed, extraTokens, included: matches.size, expected: pending.outgoing.length });
-    let desired = pending.outgoing;
+    let desired = withPromptRoles(pending.outgoing, preparedHistory);
     const requiredTokens = (await countCoreChat(desired)).reduce((sum, entry) => sum + entry.tokens, 0);
     const missingRaw = missingHistory(desired, locate(original, desired));
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
@@ -1990,7 +1944,7 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
       runtime.forceCompaction = missingRaw.length > 0;
       await runInterceptor(source, pending.budget, () => { aborted = true; }, 'prepared', fixed);
       if (aborted) throw new LocalizedError(runtime.lastStatus.text);
-      desired = withPromptRoles(source);
+      desired = withPromptRoles(source, preparedHistory);
       pending.memorySnapshot = memoryPromptSnapshot();
     }
     const present = locate(original, desired);
@@ -2008,6 +1962,10 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     if (pending.chatId !== String(getCurrentChatId()) || !fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     if (textMode) eventData.prompt = result;
     else eventData.chat.splice(0, eventData.chat.length, ...result);
+    runtime.preparedHistoryByChat.set(pending.chatId, new Map(desired.filter(message => !isSynthetic(message)).map(message => [message.index, {
+      hash: pending.fingerprints.find(item => item.index === message.index)?.hash,
+      promptText: message.promptText ?? message.formatted ?? message.mes,
+    }])));
     pending.outgoing = desired;
     pending.prepared = true;
     const counted = await countCoreChat(desired);
@@ -2055,12 +2013,13 @@ async function prepareTextRequest(data, dryRun) {
   data[field] = event.prompt;
 }
 
-function prepareChatEvent(data) { return prepareFinalPrompt(data); }
+function prepareChatEvent(data) { return prepareFinalPrompt(data, false, 0, false, nativeContext.snapshot()); }
 
 function clearCurrentOverheadEstimate() {
   ++runtime.overheadRevision;
   runtime.passivePromptDirty = true;
   runtime.fixedPromptTokensByChat.delete(String(getCurrentChatId()));
+  runtime.preparedHistoryByChat.delete(String(getCurrentChatId()));
   runtime.contextBudgetsByChat.delete(String(getCurrentChatId()));
   if (runtime.contextUsage) showContextUsage(getContextUsage({ ...runtime.contextUsage, budget: getMaxPromptTokens(), other: 0, otherKnown: false }));
   scheduleContextRefresh();
@@ -2069,13 +2028,18 @@ function clearCurrentOverheadEstimate() {
 async function validateAfterChatMutation(label) {
   clearCurrentOverheadEstimate();
   const memory = getChatMemory();
-  if (!getActiveBlocks(memory).length) return;
-  if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
-    await invalidateActiveMemory(memory, msg`${label}; active memory marked stale.`);
-  } else {
+  const sourceChanged = !activeMemoryIsValid(getCurrentComparableChat(), memory);
+  await reconcileChatMemory(memory, msg`${label}; active memory marked stale.`);
+  if (!sourceChanged && getActiveBlocks(memory).length) {
     setStatus('idle', msg`${label}; active memory remains valid.`);
   }
 }
+
+const nativeContext = installNativeContextManagement({
+  ChatCompletion, promptManager,
+  isManaged: () => getSettings().enabled && main_api === 'openai'
+    && !runtime.summarizing && !['quiet', 'impersonate'].includes(runtime.generationType),
+});
 
 globalThis[INTERCEPTOR_NAME] = runInterceptor;
 getSettings();
@@ -2103,6 +2067,7 @@ eventSource.on(event_types.GENERATION_STARTED, () => {
 for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) eventSource.on(event, () => {
   runtime.pendingPromptMeasurement = null;
   runtime.liveGeneration = false;
+  runtime.generationType = null;
   scheduleContextRefresh();
 });
 eventSource.on(event_types.PRESET_CHANGED, clearCurrentOverheadEstimate);

@@ -22,6 +22,10 @@ try {
   await page.waitForFunction(() => typeof sillyMemoriesPlusGenerateInterceptor === 'function');
   await page.waitForSelector('#smp-settings', { state: 'attached' });
   await page.locator('#preloader').waitFor({ state: 'hidden' });
+  await page.waitForFunction(async () => {
+    const { loader } = await import('/scripts/action-loader.js');
+    return SillyTavern.getContext().characters.length > 0 && !loader.active().some(handle => handle.slug === 'app-init');
+  });
   await page.evaluate(async () => {
     const script = await import('/script.js');
     const openai = await import('/scripts/openai.js');

@@ -24,6 +24,10 @@ try {
   await page.waitForFunction(() => typeof sillyMemoriesPlusGenerateInterceptor === 'function');
   await page.waitForSelector('#smp-settings', { state: 'attached' });
   await page.locator('#preloader').waitFor({ state: 'hidden' });
+  await page.waitForFunction(async () => {
+    const { loader } = await import('/scripts/action-loader.js');
+    return SillyTavern.getContext().characters.length > 0 && !loader.active().some(handle => handle.slug === 'app-init');
+  });
   await page.evaluate(async () => {
     const script = await import('/script.js');
     const openai = await import('/scripts/openai.js');
@@ -108,6 +112,8 @@ try {
   await check('prompt-regex-is-not-counted-twice', Math.abs(await other() - unclippedOther) < 100 && await page.evaluate(() => JSON.stringify(pc.snapshots.at(-1)).includes('transformed-history')));
   await page.evaluate(async () => {
     pc.c.characters.at(-1).data.extensions.world = 'Passive Lore';
+    const { world_names } = await import('/scripts/world-info.js');
+    if (!world_names.includes('Passive Lore')) world_names.push('Passive Lore');
     await pc.script.eventSource.emit(pc.script.event_types.WORLDINFO_SETTINGS_UPDATED);
   });
   await waitMeasured();

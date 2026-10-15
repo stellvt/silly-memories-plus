@@ -6,6 +6,10 @@ A SillyTavern extension for hierarchical chat history summarization.
 
 A model turns older messages into a summary of events and notes about relationships, items, promises, and other important details. This memory is sent alongside recent messages. The full conversation stays in your chat, and you can review and edit the memory blocks.
 
+When enabled, Silly Memories owns the Chat Completion history budget: Tavern no longer drops older messages before extension preflight. The prompt manager header displays `Managed by Silly Memories`. Your configured context window and response limit still apply, and the final request is checked before dispatch. Disabling the extension restores native budget management.
+
+Opening a chat also checks archived blocks invalidated by older versions. Recovery makes no model requests and requires the saved source hash to match the complete current source range. Changed sources, ambiguous rollups and unverifiable blocks stay archived. Editing one source no longer invalidates all memory, and archived blocks retain their source fingerprints.
+
 ## Installation and first setup
 
 1. Open Extensions in SillyTavern and click **Install extension**.
