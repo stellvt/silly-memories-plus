@@ -72,6 +72,7 @@ import { installNativeContextManagement } from './lib/native-context.mjs';
 import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, inspectBlockSource, reconcileMemorySources } from './lib/source-identity.mjs';
 import { diagnosticError, recordDiagnostic, exportDiagnostics, nextDiagnosticRequest } from './lib/diagnostics.mjs';
 import { diagnosticName, inspectConversation, inspectChatPrompt } from './lib/prompt-inspection.mjs';
+import { inspectChatTextTrace, traceIndexedText } from './lib/text-trace.mjs';
 import { getCurrentLocale, translate as nativeTranslate } from '../../../i18n.js';
 import { applyTranslations, displayText, initializeI18n, LocalizedError, message as msg, setLanguage, t, translate } from './lib/i18n.mjs';
 
@@ -1261,6 +1262,10 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
   const preparedChatId = getCurrentChatId();
   const preparedFingerprints = getCurrentComparableChat().map(fingerprintMessage);
   const originalSource = structuredClone(coreChat);
+  if (settings.debug && type !== 'prepared') recordDiagnostic('text-trace', {
+    requestId, phase: type, fromStage: 'stored-history', toStage: 'interceptor',
+    messages: traceIndexedText(getCurrentComparableChat(), originalSource),
+  });
   // A prior request is a display estimate, never authority to block a new one.
   const fixedPromptTokens = measuredFixedTokens ?? (type === 'manual' ? runtime.fixedPromptTokensByChat.get(String(preparedChatId)) || 0 : 0);
 
@@ -1503,7 +1508,8 @@ async function measurePassivePrompt(data, dryRun) {
   const preparedHistory = nativeContext.snapshot();
   // Dry runs omit extension interceptors. Subtract only raw text actually present
   // in the native prompt; clipped history must not become fixed prompt overhead.
-  const source = withPromptRoles(await prepareStoredHistory(snapshot.source), preparedHistory);
+  const processed = await prepareStoredHistory(snapshot.source);
+  const source = withPromptRoles(processed, preparedHistory);
   const chatMode = snapshot.api === 'openai';
   const matches = chatMode ? locateChatConversation(prompt, source) : locateTextConversation(prompt, source);
   const native = chatMode ? promptManager?.messages?.flatten?.() || [] : [];
@@ -1524,6 +1530,11 @@ async function measurePassivePrompt(data, dryRun) {
   runtime.fixedPromptTokensByChat.set(String(snapshot.chatId), fixed);
   runtime.contextBudgetsByChat.set(String(snapshot.chatId), getMaxPromptTokens());
   runtime.passivePromptDirty = false;
+  if (getSettings().debug) {
+    recordDiagnostic('text-trace', { requestId: snapshot.requestId, phase: 'passive',
+      fromStage: 'stored-history', toStage: 'prompt-processing', messages: traceIndexedText(snapshot.source, processed) });
+    if (chatMode) tracePromptText(snapshot.requestId, 'passive', processed, source, preparedHistory, native, prompt);
+  }
   recordDiagnostic('prompt-estimate', { requestId: snapshot.requestId, phase: 'passive', mode: chatMode ? 'chat' : 'text', total, fixed, included: matches.size, expected: source.length,
     environment: diagnosticEnvironment(), ...inspection, matches: undefined,
     excluded: snapshot.source.filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' })) });
@@ -2053,6 +2064,20 @@ function formatTextMemory(message) {
   return narrator ? `${message.mes}\n` : `${message.name}: ${message.mes}\n`;
 }
 
+function tracePromptText(requestId, phase, source, conversation, records, native, prompt) {
+  if (!getSettings().debug) return;
+  try {
+    recordDiagnostic('text-trace', { requestId, phase,
+      ...inspectChatTextTrace({ source, conversation, records, native, prompt,
+        formatted: source.map(message => setOpenAIMessages([message])[0]),
+        sourceStage: phase === 'passive' ? 'prompt-processing' : 'interceptor',
+        finalStage: phase === 'passive' ? 'passive-prompt' : phase }) });
+  } catch (error) {
+    // Diagnostics cannot change validation or interrupt a model request.
+    recordDiagnostic('text-trace-unavailable', { requestId, phase, code: error.name });
+  }
+}
+
 async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, nativeRequest = false, preparedHistory = undefined) {
   const pending = runtime.pendingPromptMeasurement;
   if (!pending || runtime.summarizing || eventData?.dryRun || pending.chatId !== String(getCurrentChatId())) return;
@@ -2084,6 +2109,7 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (!fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     if (JSON.stringify(pending.excluded) !== JSON.stringify(excludedSourceMessages())) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
+    if (!textMode) tracePromptText(pending.requestId, phase, pending.source, previous, preparedHistory, native || [], original);
     const count = textMode ? value => countTextTokens(value) : value => countChatPrompt(value, countTokensOpenAIAsync, native || []);
     const total = await count(original) + extraTokens;
     const included = await Promise.all([...matches.keys()].map(index => countTextTokens(previous[index].promptText ?? previous[index].mes)));

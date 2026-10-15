@@ -98,7 +98,9 @@ The preset, active lorebooks, and additional prompts are counted in the assemble
 
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Debug → Interface language**.
 
-Under **Debug**, **Download logs** saves a JSON file with message indices, block IDs and ranges, token costs by source, missing messages, and invalidation reasons. A request ID links preparation to handoff to SillyTavern's transport; that stage does not confirm provider receipt. The file includes the model and tokenizer, but no conversation text, summaries, prompts, or connection keys. **Debug logging** enables detailed output in the browser console.
+Under **Debug**, **Download logs** saves a JSON file with message indices, block IDs and ranges, token costs by source, missing messages, and invalidation reasons. A request ID links preparation to handoff to SillyTavern's transport; that stage does not confirm provider receipt. The file includes the model and tokenizer, but no conversation text, summaries, prompts, or connection keys.
+
+Enable **Debug logging**, repeat generation, and download the logs. Events named `text-trace` show text lengths and hashes before and after history processing, macro expansion, prompt assembly, and transport preflight. Differences include the stage, added and removed character counts, and escaped whitespace. Non-whitespace text fragments are not recorded. Inferred matches and ambiguous candidates are marked separately and do not affect request validation. The setting also enables detailed browser console output.
 
 ## Custom prompts
 
