@@ -94,7 +94,7 @@ The preset, active lorebooks, and additional prompts are counted in the assemble
 
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Debug → Interface language**.
 
-Under **Debug**, **Download logs** saves a JSON file with context calculations, compaction stages, and error codes from the current session. It contains no chat, summary, or prompt text, connection URLs, or keys. **Debug logging** enables detailed extension output in the browser console.
+Under **Debug**, **Download logs** saves a JSON file with message indices, block IDs and ranges, token costs by source, missing messages, and invalidation reasons. A request ID links preparation to handoff to SillyTavern's transport; that stage does not confirm provider receipt. The file includes the model and tokenizer, but no conversation text, summaries, prompts, or connection keys. **Debug logging** enables detailed output in the browser console.
 
 ## Custom prompts
 

@@ -16,14 +16,14 @@ import {
   getContext,
   renderExtensionTemplateAsync,
 } from '../../../extensions.js';
-import { getTokenCountAsync, countTokensOpenAIAsync } from '../../../tokenizers.js';
+import { getTokenCountAsync as getNativeTokenCountAsync, countTokensOpenAIAsync, getTokenizerModel } from '../../../tokenizers.js';
 import { formatInstructModeChat } from '../../../instruct-mode.js';
 import { is_group_generating } from '../../../group-chats.js';
 import { appendFileContent } from '../../../chats.js';
 import { isExecutingCommandsFromChatInput } from '../../../slash-commands.js';
 import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { system_message_types } from '../../../system-messages.js';
-import { ChatCompletion, promptManager, setOpenAIMessages } from '../../../openai.js';
+import { ChatCompletion, promptManager, setOpenAIMessages, oai_settings, getChatCompletionModel } from '../../../openai.js';
 import { ConnectionManagerRequestService } from '../../shared.js';
 import {
   buildCompactionPlan,
@@ -35,6 +35,7 @@ import {
   editMemoryBlock,
   getActiveBlocks,
   getActiveFrontier,
+  getUncoveredMessages,
   getBlockAncestorIds,
   getManualRollupBlocks,
   normalizeMemory,
@@ -67,7 +68,8 @@ import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
 import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory } from './lib/prompt.mjs';
 import { installNativeContextManagement } from './lib/native-context.mjs';
 import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, reconcileMemorySources } from './lib/source-identity.mjs';
-import { diagnosticError, recordDiagnostic, exportDiagnostics } from './lib/diagnostics.mjs';
+import { diagnosticError, recordDiagnostic, exportDiagnostics, nextDiagnosticRequest } from './lib/diagnostics.mjs';
+import { diagnosticName, inspectConversation, inspectChatPrompt } from './lib/prompt-inspection.mjs';
 import { getCurrentLocale, translate as nativeTranslate } from '../../../i18n.js';
 import { applyTranslations, displayText, initializeI18n, LocalizedError, message as msg, setLanguage, t, translate } from './lib/i18n.mjs';
 
@@ -110,8 +112,26 @@ const runtime = {
   factsEditorValue: '',
   contextUsage: null,
   generationType: null,
+  diagnosticRequestId: null,
 };
 let settingsInitialized = false;
+
+async function countTextTokens(text) {
+  if (typeof text !== 'string' || !text.length) return 0;
+  // Explicit chat tokenization avoids the host's padding-dependent shadow estimate.
+  return main_api === 'openai'
+    ? Math.max(0, await countTokensOpenAIAsync({ role: 'system', content: text }, true))
+    : getNativeTokenCountAsync(text);
+}
+
+function diagnosticEnvironment() {
+  return { api: main_api, provider: main_api === 'openai' ? diagnosticName(oai_settings.chat_completion_source) : main_api,
+    model: main_api === 'openai' ? diagnosticName(getChatCompletionModel()) : null,
+    tokenizer: main_api === 'openai' ? diagnosticName(getTokenizerModel()) : 'native-text',
+    tokenizerMode: main_api === 'openai' ? 'explicit-chat-tokenizer' : 'native-text',
+    contextBudget: getMaxPromptTokens(), tokenPadding: getContext().powerUserSettings.token_padding,
+    nativeClipping: !(getSettings().enabled && main_api === 'openai' && !runtime.summarizing && !['quiet', 'impersonate'].includes(runtime.generationType)) };
+}
 
 function getSettings() {
   if (!settingsInitialized) {
@@ -151,7 +171,7 @@ function setStatus(kind, text) {
   const started = kind === 'working' && runtime.lastStatus.kind !== 'working';
   runtime.lastStatus = { kind, text };
   if (changed) {
-    recordDiagnostic('status', { kind, code: text.translationKey || text.key || text.name || 'status', ...(text instanceof Error ? { causes: diagnosticError(text) } : {}) });
+    recordDiagnostic('status', { requestId: runtime.diagnosticRequestId, kind, code: text.translationKey || text.key || text.name || 'status', values: text.diagnosticValues, ...(text instanceof Error ? { causes: diagnosticError(text) } : {}) });
     if (started || ['success', 'error', 'warning'].includes(kind)) {
       const noticeKind = started ? 'info' : kind;
       showNotice(noticeKind, text);
@@ -183,6 +203,7 @@ function updateJobControls() {
 function beginMemoryJob(chatId = null) {
   if (runtime.summarizing) throw new LocalizedError(msg('Another memory job is already running'));
   runtime.summarizing = true;
+  runtime.diagnosticRequestId = nextDiagnosticRequest();
   runtime.cancelRequested = false;
   runtime.abortController = new AbortController();
   runtime.activeCompactionChatId = chatId;
@@ -195,6 +216,7 @@ function endMemoryJob() {
   runtime.abortController = null;
   runtime.activeCompactionChatId = null;
   runtime.summarizing = false;
+  runtime.diagnosticRequestId = null;
   runtime.cancelRequested = false;
   updateBlockActionBar();
   updateManualRollupControls();
@@ -276,10 +298,17 @@ function getCurrentComparableChat() {
 
 function fingerprintsStillMatch(fingerprints) {
   const current = getCurrentComparableChat();
-  return fingerprints.every(fingerprint => {
+  const missing = fingerprints.flatMap(fingerprint => {
     const message = findCurrentMessage(current, fingerprint);
-    return Boolean(message && fingerprintMessage(message).hash === fingerprint.hash);
+    const actualHash = message ? fingerprintMessage(message).hash : null;
+    return message && message.index === fingerprint.index && actualHash === fingerprint.hash ? [] : [{
+      index: fingerprint.index, actualIndex: message?.index ?? null,
+      reason: !message ? 'source-missing' : message.index !== fingerprint.index ? 'source-moved' : 'content-changed',
+      expectedHash: fingerprint.hash, actualHash,
+    }];
   });
+  if (missing.length) recordDiagnostic('source-check-failed', { requestId: runtime.diagnosticRequestId, missing });
+  return !missing.length;
 }
 
 function memoryPromptSnapshot() {
@@ -297,21 +326,17 @@ async function reconcileChatMemory(memory, reason = null) {
   const result = reconcileMemorySources(memory, getCurrentComparableChat());
   if (result.changedIds.length || result.recoveredIds.length) {
     await setChatMemory(result.memory, true, chatId);
-    recordDiagnostic('memory-reconciled', { invalidated: result.changedIds.length, recovered: result.recoveredIds.length });
+    recordDiagnostic('memory-reconciled', { invalidated: result.changedIds.length, recovered: result.recoveredIds.length, blocks: result.changes });
     if (result.changedIds.length && reason) setStatus('warning', reason);
   }
   return result.memory;
-}
-
-async function invalidateActiveMemory(memory, reason) {
-  await reconcileChatMemory(memory, reason);
 }
 
 async function countCoreChat(coreChat) {
   const counts = await Promise.all(coreChat.map(async message => ({
     message,
     index: Math.max(0, Number(message?.index) || 0),
-    tokens: await getTokenCountAsync(String(message?.promptText ?? message?.mes ?? ''), 0),
+    tokens: await countTextTokens(String(message?.promptText ?? message?.mes ?? '')),
   })));
   return counts;
 }
@@ -319,7 +344,7 @@ async function countCoreChat(coreChat) {
 async function refreshActiveBlockTokenCounts(memory, settings) {
   for (const block of memory.blocks) {
     if (block.status !== 'active') continue;
-    block.summaryTokens = await getTokenCountAsync(renderBlockText(block, settings.includeStructuredMemory), 0);
+    block.summaryTokens = await countTextTokens(renderBlockText(block, settings.includeStructuredMemory));
     if (block.useRaw) block.rawTokens = sumTokens(await countCoreChat(getBlockRangeMessages(block)));
   }
   return memory;
@@ -331,7 +356,7 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
     throw new LocalizedError(msg('Chat changed during compaction'));
   }
   const settings = getSettings();
-  const countTokens = value => getTokenCountAsync(value, 0);
+  const countTokens = value => countTextTokens(value);
   const { usefulOutputTokens, requestMaxTokens, systemPrompt } = await getSummarySourceBudget({
     settings,
     stage,
@@ -341,7 +366,8 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
     countTokens,
   });
   await assertSummaryRequestFits({ settings, prompt, systemPrompt, requestMaxTokens, countTokens });
-  recordDiagnostic('summary-request', { stage, level, targetTokens, requestMaxTokens, inputTokens: await countTokens(prompt), separateProfile: Boolean(settings.summaryProfileId) });
+  const summaryRequestId = nextDiagnosticRequest();
+  recordDiagnostic('summary-request', { requestId: summaryRequestId, parentRequestId: runtime.diagnosticRequestId, stage, level, targetTokens, requestMaxTokens, inputTokens: await countTokens(prompt), separateProfile: Boolean(settings.summaryProfileId), reasoningEffort: 'low' });
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: prompt },
@@ -381,11 +407,11 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
       throw error;
     }
     const canonicalText = JSON.stringify(structured);
-    const outputTokens = await getTokenCountAsync(canonicalText, 0);
+    const outputTokens = await countTextTokens(canonicalText);
     if (outputTokens > usefulOutputTokens) {
       throw new LocalizedError(msg`Summarizer output exceeded the useful output limit (${outputTokens}/${usefulOutputTokens} tokens)`);
     }
-    recordDiagnostic('summary-response', { outputTokens, finishReason: /^[a-z_]{0,64}$/i.test(finishReason) ? finishReason : 'other' });
+    recordDiagnostic('summary-response', { requestId: summaryRequestId, parentRequestId: runtime.diagnosticRequestId, outputTokens, finishReason: /^[a-z_]{0,64}$/i.test(finishReason) ? finishReason : 'other' });
     return canonicalText;
   };
 
@@ -449,10 +475,10 @@ async function reduceStructuredSummaries(parts, targetTokens, level, round = 1, 
     targetTokens,
     level,
     instruction,
-    countTokens: value => getTokenCountAsync(value, 0),
+    countTokens: value => countTextTokens(value),
   });
   const groups = await chunkStructuredSources(parts.map((structured, index) => ({ index: index + 1, structured })),
-    Math.floor(inputBudget * 0.9), value => getTokenCountAsync(value, 0));
+    Math.floor(inputBudget * 0.9), value => countTextTokens(value));
 
   if (groups.length === 1) {
     return await requestSummary(groups[0], targetTokens, level, 'rollup', instruction);
@@ -484,7 +510,7 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
     }) || entry.message))
     : childBlocks.flatMap(block => getBlockRangeMessages(block).map(fingerprintMessage));
   const stage = isRaw ? 'raw' : 'rollup';
-  const countTokens = value => getTokenCountAsync(value, 0);
+  const countTokens = value => countTextTokens(value);
   const { sourceBudget: inputBudget } = await getSummarySourceBudget({
     settings,
     stage,
@@ -554,12 +580,12 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
     createdAt: Date.now(),
   };
 
-  block.summaryTokens = await getTokenCountAsync(renderBlockText(block, settings.includeStructuredMemory), 0);
+  block.summaryTokens = await countTextTokens(renderBlockText(block, settings.includeStructuredMemory));
   if (block.summaryTokens > targetTokens) {
     try {
       const reducedText = await requestSummary(JSON.stringify(structured), targetTokens, level, 'reduce', instruction);
       const reduced = { ...block, structured: parseStructuredSummary(reducedText) };
-      reduced.summaryTokens = await getTokenCountAsync(renderBlockText(reduced, settings.includeStructuredMemory), 0);
+      reduced.summaryTokens = await countTextTokens(renderBlockText(reduced, settings.includeStructuredMemory));
       if (reduced.summaryTokens < block.summaryTokens) block = reduced;
     } catch (error) {
       if (runtime.cancelRequested || runtime.abortController?.signal.aborted || (runtime.activeCompactionChatId !== null && getCurrentChatId() !== runtime.activeCompactionChatId)) throw error;
@@ -568,6 +594,8 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
       recordDiagnostic('reduction-failed', { causes: diagnosticError(error), retainedTokens: block.summaryTokens });
     }
   }
+  recordDiagnostic('block-staged', { requestId: runtime.diagnosticRequestId, id: block.id, level, from: sourceFrom, to: sourceTo,
+    sourceIndices: sourceEntries.map(entry => entry.index), childIds: childBlocks.map(child => child.id), sourceTokens, summaryTokens: block.summaryTokens });
   return block;
 }
 
@@ -797,11 +825,15 @@ async function deleteSelectedMemoryBlock(blockId = runtime.selectedBlockId) {
       refreshBlockSourceIdentity(block);
     } catch {
       block.status = 'stale';
+      block.staleReason = 'source-changed';
       if (!preview.staleIds.includes(id)) preview.staleIds.push(id);
     }
   }
 
   await setChatMemory(preview.memory);
+  recordDiagnostic('memory-deleted', { targetId: selected.id, removedIds: preview.removedIds,
+    blocks: preview.memory.blocks.filter(block => preview.staleIds.includes(block.id) || preview.reactivatedIds.includes(block.id))
+      .map(block => ({ id: block.id, level: block.level, from: block.sourceFrom, to: block.sourceTo, status: block.status, reason: block.staleReason || 'parent-deleted' })) });
   if (runtime.selectedBlockId === selected.id) runtime.selectedBlockId = null;
   if (runtime.editingBlockId === selected.id) runtime.editingBlockId = null;
   setStatus(
@@ -874,7 +906,7 @@ async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
   const blockElement = findBlockElement(block.id);
   const structured = readBlockEditor(blockElement);
   const settings = getSettings();
-  const summaryTokens = await getTokenCountAsync(renderBlockText({ ...block, structured }, settings.includeStructuredMemory), 0);
+  const summaryTokens = await countTextTokens(renderBlockText({ ...block, structured }, settings.includeStructuredMemory));
   const result = editMemoryBlock(memory, block.id, structured, summaryTokens);
 
   for (const id of result.reactivatedIds) {
@@ -884,12 +916,16 @@ async function saveSelectedBlockEdit(blockId = runtime.editingBlockId) {
       refreshBlockSourceIdentity(reactivated);
     } catch {
       reactivated.status = 'stale';
+      reactivated.staleReason = 'source-changed';
       if (!result.staleIds.includes(id)) result.staleIds.push(id);
     }
   }
   if (getCurrentChatId() !== chatId) throw new LocalizedError(msg('Chat changed before edited block commit'));
   runtime.editingBlockId = null;
   await setChatMemory(result.memory, true, chatId);
+  recordDiagnostic('memory-edited', { targetId: block.id,
+    blocks: result.memory.blocks.filter(item => result.staleIds.includes(item.id) || result.reactivatedIds.includes(item.id))
+      .map(item => ({ id: item.id, level: item.level, from: item.sourceFrom, to: item.sourceTo, status: item.status, reason: item.staleReason || 'parent-edited' })) });
   setStatus(
     'success',
     msg`Saved block edit; invalidated ${result.dependentIds.length} rollup(s), reactivated ${result.reactivatedIds.length} source block(s).`,
@@ -1037,7 +1073,11 @@ function applyMemoryToCoreChat(coreChat, memory) {
   const result = settings.enabled ? rewriteConversationWithMemory(
     coreChat,
     memory,
-    text => makeSyntheticMemoryMessage(text, settings),
+    (text, blocks) => {
+      const message = makeSyntheticMemoryMessage(text, settings);
+      message.extra.sillyMemoriesPlusBlockIds = blocks.map(block => block.id);
+      return message;
+    },
     settings.includeStructuredMemory,
   ) : { messages: [...coreChat], activeBlocks: [], coveredThrough: -1 };
   const facts = renderPinnedFacts(memory.pinnedFacts);
@@ -1096,7 +1136,8 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
         for (const block of getActiveFrontier(candidate).blocks) assertBlockSourceStillCurrent(block, chatId, msg('compaction'));
         assertPinnedFactsCurrent(candidate, chatId);
         await setChatMemory(candidate, true, chatId);
-        recordDiagnostic('checkpoint', { blocks: candidate.blocks.length, active: getActiveBlocks(candidate).length });
+        recordDiagnostic('checkpoint', { requestId: runtime.diagnosticRequestId, totalBlocks: candidate.blocks.length,
+          blocks: candidate.blocks.map(block => ({ id: block.id, level: block.level, from: block.sourceFrom, to: block.sourceTo, status: block.status, reason: block.staleReason })) });
       },
     });
 
@@ -1132,8 +1173,11 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
   const settings = getSettings();
   if (!Array.isArray(coreChat) || !coreChat.length) return;
   if (runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
+  const requestId = type === 'prepared' ? runtime.pendingPromptMeasurement?.requestId : nextDiagnosticRequest();
+  runtime.diagnosticRequestId = requestId;
+  const excluded = getCurrentComparableChat().filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' }));
   // Synthetic facts never become a source or accumulate across interceptor calls.
-  const sourceChat = coreChat.filter(message => !message.extra?.sillyMemoriesPlusPinnedFacts);
+  const sourceChat = coreChat.filter(message => !message.extra?.sillyMemoriesPlusPinnedFacts && !message.extra?.[Symbol.for('ignore')]);
   if (sourceChat.length !== coreChat.length) coreChat.splice(0, coreChat.length, ...sourceChat);
   runtime.contextBudgetsByChat.set(String(getCurrentChatId()), contextSize);
   ++runtime.contextRevision;
@@ -1149,7 +1193,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
   try {
     memory = settings.enabled ? await reconcileChatMemory(getChatMemory()) : getChatMemory();
     if (settings.enabled && !activeMemoryIsValid(getCurrentComparableChat(), memory)) {
-      await invalidateActiveMemory(memory, msg('Memory source changed; active blocks marked stale.'));
+      await reconcileChatMemory(memory, msg('Memory source changed; active blocks marked stale.'));
       memory = getChatMemory();
     }
     if (settings.enabled) {
@@ -1157,11 +1201,10 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
       memory = await refreshActiveBlockTokenCounts(memory, settings);
     }
     const facts = renderPinnedFacts(memory.pinnedFacts);
-    pinnedTokens = facts ? await getTokenCountAsync(facts, 0) : 0;
+    pinnedTokens = facts ? await countTextTokens(facts) : 0;
 
     const activeFrontier = settings.enabled ? getActiveFrontier(memory) : { blocks: [], coveredThrough: -1 };
-    const coveredThrough = activeFrontier.coveredThrough;
-    const rawMessages = coreChat.filter(message => Number(message?.index) > coveredThrough);
+    const rawMessages = getUncoveredMessages(coreChat, activeFrontier.blocks);
     const rawEntries = await countCoreChat(rawMessages);
     plan = buildCompactionPlan({
       contextBudget: contextSize,
@@ -1185,7 +1228,9 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
     return;
   }
   updateContextFromPlan(plan, contextSize, pinnedTokens);
-  recordDiagnostic('plan', { kind: plan.kind, reason: plan.reason, budget: contextSize, fixed: fixedPromptTokens, facts: pinnedTokens, memory: plan.blockTokens, raw: plan.rawTokens });
+  recordDiagnostic('plan', { requestId, phase: type, kind: plan.kind, reason: plan.reason, budget: contextSize, fixed: fixedPromptTokens, facts: pinnedTokens, memory: plan.blockTokens, raw: plan.rawTokens,
+    blocks: getActiveFrontier(memory).blocks.map(block => ({ id: block.id, from: block.sourceFrom, to: block.sourceTo, level: block.level, useRaw: block.useRaw })),
+    sourceIndices: plan.source?.map(entry => entry.index) || [], tailIndices: plan.tail?.map(entry => entry.index) || [], excluded });
   runtime.forceCompaction = false;
   updateStats(memory);
 
@@ -1235,7 +1280,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
 
       memory = getChatMemory();
       if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
-        await invalidateActiveMemory(memory, msg`Compaction source changed: ${errorText}`);
+        await reconcileChatMemory(memory, msg`Compaction source changed: ${errorText}`);
         memory = getChatMemory();
       } else {
         setStatus('warning', errorText);
@@ -1254,9 +1299,9 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
     memory = getChatMemory();
     if (settings.enabled) memory = await refreshActiveBlockTokenCounts(memory, settings);
     const frontier = settings.enabled ? getActiveFrontier(memory) : { blocks: [], coveredThrough: -1 };
-    const finalRaw = await countCoreChat(coreChat.filter(message => Number(message?.index) > frontier.coveredThrough));
+    const finalRaw = await countCoreChat(getUncoveredMessages(coreChat, frontier.blocks));
     const facts = renderPinnedFacts(memory.pinnedFacts);
-    pinnedTokens = facts ? await getTokenCountAsync(facts, 0) : 0;
+    pinnedTokens = facts ? await countTextTokens(facts) : 0;
     assertPinnedFactsCurrent(memory, preparedChatId);
     if (!fingerprintsStillMatch(preparedFingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
     const fixedTokens = fixedPromptTokens + pinnedTokens;
@@ -1285,6 +1330,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
   if (type !== 'manual' && type !== 'prepared') {
     runtime.pendingPromptMeasurement = {
       chatId: String(getCurrentChatId()), budget: contextSize,
+      requestId, excluded,
       source: originalSource, outgoing: withPromptRoles(coreChat), initialOutgoing: withPromptRoles(coreChat), fingerprints: preparedFingerprints,
       memorySnapshot: memoryPromptSnapshot(),
     };
@@ -1293,7 +1339,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
 
 function describeContextBlock(plan, pinnedTokens) {
   const message = describeBlockedPlan({ ...plan, overflowTokens: Math.max(0, plan.totalTokens - plan.usableBudget) });
-  return pinnedTokens ? msg`${message} Shorten pinned facts to free context.` : message;
+  return pinnedTokens >= plan.grossBudget ? msg`${message} Shorten pinned facts to free context.` : message;
 }
 
 function showContextUsage(usage) {
@@ -1358,7 +1404,8 @@ function beginPromptMeasurement(type, options, dryRun) {
   if (runtime.liveGeneration || runtime.summarizing || type === 'quiet' || type === 'impersonate') return;
   runtime.passivePromptMeasurement = {
     chatId: getCurrentChatId(), revision: runtime.overheadRevision, api: main_api,
-    source: structuredClone(getCurrentComparableChat()),
+    requestId: nextDiagnosticRequest(),
+    source: getCurrentComparableChat().map(message => ({ ...structuredClone(message), extra: { ...structuredClone(message.extra || {}), [Symbol.for('ignore')]: Boolean(message.extra?.[Symbol.for('ignore')]) } })),
   };
 }
 
@@ -1372,9 +1419,9 @@ async function measurePassivePrompt(data, dryRun) {
   const preparedHistory = nativeContext.snapshot();
   // Dry runs omit extension interceptors. Subtract only raw text actually present
   // in the native prompt; clipped history must not become fixed prompt overhead.
-  const source = withPromptRoles(await Promise.all(snapshot.source.map(async (message, index) => {
+  const source = withPromptRoles(await Promise.all(snapshot.source.filter(message => !message.extra?.[Symbol.for('ignore')]).map(async (message) => {
     const placement = message.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
-    const text = getRegexedString(message.mes, placement, { isPrompt: true, depth: snapshot.source.length - index - 1 });
+    const text = getRegexedString(message.mes, placement, { isPrompt: true, depth: snapshot.source.length - message.index - 1 });
     const mes = await appendFileContent(message, text);
     const titles = [message.extra?.append_title && message.extra?.title,
       ...(message.extra?.media || []).filter(media => media.append_title).map(media => media.title)].filter(Boolean);
@@ -1383,8 +1430,9 @@ async function measurePassivePrompt(data, dryRun) {
   const chatMode = snapshot.api === 'openai';
   const matches = chatMode ? locateChatConversation(prompt, source) : locateTextConversation(prompt, source);
   const native = chatMode ? promptManager?.messages?.flatten?.() || [] : [];
-  const total = chatMode ? await countChatPrompt(prompt, countTokensOpenAIAsync, native) : await getTokenCountAsync(prompt, 0);
-  const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(source[index].promptText ?? source[index].mes, 0)));
+  const total = chatMode ? await countChatPrompt(prompt, countTokensOpenAIAsync, native) : await countTextTokens(prompt);
+  const included = await Promise.all([...matches.keys()].map(index => countTextTokens(source[index].promptText ?? source[index].mes)));
+  const inspection = chatMode ? await inspectChatPrompt(prompt, source, getChatMemory().blocks, native, value => countChatPrompt(value, countTokensOpenAIAsync, native), countTextTokens) : inspectConversation(prompt, source, getChatMemory().blocks, true);
   if (snapshot.chatId !== getCurrentChatId() || snapshot.revision !== runtime.overheadRevision
     || snapshot.api !== main_api || runtime.liveGeneration || runtime.summarizing
     || snapshot.source.length !== getCurrentComparableChat().length
@@ -1393,13 +1441,15 @@ async function measurePassivePrompt(data, dryRun) {
     return;
   }
   const fixed = Math.max(0, total - included.reduce((sum, value) => sum + value, 0));
-  runtime.preparedHistoryByChat.set(String(snapshot.chatId), new Map(snapshot.source.map((message, index) => [message.index, {
-    hash: fingerprintMessage(message).hash, promptText: source[index].promptText ?? source[index].formatted ?? source[index].mes,
+  runtime.preparedHistoryByChat.set(String(snapshot.chatId), new Map(source.map(message => [message.index, {
+    hash: fingerprintMessage(snapshot.source.find(item => item.index === message.index)).hash, promptText: message.promptText ?? message.formatted ?? message.mes,
   }])));
   runtime.fixedPromptTokensByChat.set(String(snapshot.chatId), fixed);
   runtime.contextBudgetsByChat.set(String(snapshot.chatId), getMaxPromptTokens());
   runtime.passivePromptDirty = false;
-  recordDiagnostic('prompt-estimate', { mode: chatMode ? 'chat' : 'text', total, fixed, included: matches.size });
+  recordDiagnostic('prompt-estimate', { requestId: snapshot.requestId, phase: 'passive', mode: chatMode ? 'chat' : 'text', total, fixed, included: matches.size, expected: source.length,
+    environment: diagnosticEnvironment(), ...inspection, matches: undefined,
+    excluded: snapshot.source.filter(message => message.extra?.[Symbol.for('ignore')]).map(message => ({ index: message.index, reason: 'hidden-by-tavern' })) });
   scheduleContextRefresh();
 }
 
@@ -1407,7 +1457,7 @@ async function refreshContextUsage(revision) {
   const chatId = getCurrentChatId();
   const meter = document.getElementById('smp-context-meter');
   if (!meter) return;
-  const chat = getCurrentComparableChat();
+  const chat = getCurrentComparableChat().filter(message => !message.extra?.[Symbol.for('ignore')]);
   if (chatId == null || !chat.length) {
     runtime.contextUsage = null;
     meter.textContent = translate('Open a chat to measure context.');
@@ -1424,7 +1474,7 @@ async function refreshContextUsage(revision) {
     return prepared?.hash === fingerprintMessage(message).hash ? { ...message, promptText: prepared.promptText } : message;
   }));
   const factsText = renderPinnedFacts(memory.pinnedFacts);
-  const facts = factsText ? await getTokenCountAsync(factsText, 0) : 0;
+  const facts = factsText ? await countTextTokens(factsText) : 0;
   // Measurements from a previous chat or an earlier refresh cannot update the UI.
   if (revision !== runtime.contextRevision || chatId !== getCurrentChatId()) return;
   const key = String(chatId);
@@ -1611,7 +1661,7 @@ async function testSummarizerConnection() {
     ]);
     const text = await requestSummary(prompt, 512, 1, 'raw');
     const structured = parseStructuredSummary(text);
-    const tokens = await getTokenCountAsync(JSON.stringify(structured), 0);
+    const tokens = await countTextTokens(JSON.stringify(structured));
     setStatus('success', msg`Summarizer test passed (${tokens}t): ${structured.narrative.slice(0, 140)}`);
     return structured;
   } catch (error) {
@@ -1890,8 +1940,7 @@ async function onChatChanged() {
 
 function withPromptRoles(messages, preparedHistory = undefined) {
   if (main_api === 'openai') {
-    return nativeContext.format(messages, message => setOpenAIMessages([message])[0]
-      || { role: message.is_user ? 'user' : 'assistant', content: message.mes }, preparedHistory);
+    return nativeContext.format(messages, message => setOpenAIMessages([message])[0], preparedHistory);
   }
   return messages.map(message => ({ ...message, promptRole: message.extra?.type === system_message_types.NARRATOR ? 'system' : message.is_user ? 'user' : 'assistant' }));
 }
@@ -1912,7 +1961,7 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
   if (textMode ? typeof original !== 'string' : !Array.isArray(original)) return;
   // Native prompt-manager dry runs may happen while tokenization or compaction
   // awaits I/O. Keep this request's exact expansions through the transport guard.
-  preparedHistory ??= pending.preparedHistory ?? nativeContext.snapshot();
+  preparedHistory = pending.preparedHistory ?? preparedHistory ?? nativeContext.snapshot();
   pending.preparedHistory = preparedHistory;
   const locate = textMode ? locateTextConversation : locateChatConversation;
   let previous = withPromptRoles(pending.outgoing, preparedHistory);
@@ -1922,24 +1971,31 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
   const initialMatches = locate(original, withPromptRoles(pending.initialOutgoing, preparedHistory));
   if (initialMatches.size > matches.size) { previous = withPromptRoles(pending.initialOutgoing, preparedHistory); matches = initialMatches; }
   // Quiet generation uses the same event, but not the native chat builder.
-  const native = !textMode && promptManager?.messages?.flatten?.().filter(message => message.content || message.tool_calls);
+  const native = !textMode && (pending.nativeMessages ?? promptManager?.messages?.flatten?.().filter(message => message.content || message.tool_calls));
   if (!matches.size && !nativeRequest && !(native && JSON.stringify(native.map(message => [message.role, message.content])) === JSON.stringify(original.map(message => [message.role, message.content])))) return;
+  if (!textMode) pending.nativeMessages = native || [];
+  const phase = nativeRequest ? 'transport-preflight' : 'assembled-prompt';
+  let inspection = inspectConversation(original, previous, getChatMemory().blocks, textMode);
   runtime.preparingPrompt = true;
   try {
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (!fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
-    const count = textMode ? value => getTokenCountAsync(value, 0) : value => countChatPrompt(value, countTokensOpenAIAsync, native || []);
+    const count = textMode ? value => countTextTokens(value) : value => countChatPrompt(value, countTokensOpenAIAsync, native || []);
     const total = await count(original) + extraTokens;
-    const included = await Promise.all([...matches.keys()].map(index => getTokenCountAsync(previous[index].promptText ?? previous[index].mes, 0)));
+    const included = await Promise.all([...matches.keys()].map(index => countTextTokens(previous[index].promptText ?? previous[index].mes)));
     const fixed = Math.max(0, total - included.reduce((a, b) => a + b, 0));
     runtime.fixedPromptTokensByChat.set(pending.chatId, fixed);
-    recordDiagnostic('prompt-measurement', { mode: textMode ? 'text' : 'chat', total, fixed, extraTokens, included: matches.size, expected: pending.outgoing.length });
+    const detail = textMode ? inspection : await inspectChatPrompt(original, previous, getChatMemory().blocks, native || [], count, countTextTokens);
+    recordDiagnostic('prompt-measurement', { requestId: pending.requestId, phase, mode: textMode ? 'text' : 'chat', total, fixed, extraTokens, included: matches.size, expected: previous.length,
+      environment: diagnosticEnvironment(), inventory: detail.inventory, missing: detail.missing, components: detail.components, excluded: pending.excluded });
     let desired = withPromptRoles(pending.outgoing, preparedHistory);
     const requiredTokens = (await countCoreChat(desired)).reduce((sum, entry) => sum + entry.tokens, 0);
     const missingRaw = missingHistory(desired, locate(original, desired));
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (fixed + requiredTokens >= pending.budget * getSettings().triggerRatio || missingRaw.length) {
-      const source = structuredClone(pending.source);
+      // Plan and summarize the same expansions that are present in this request.
+      // Stored fingerprints remain attached to the original chat, not this text.
+      const source = withPromptRoles(pending.source, preparedHistory).map(message => ({ ...message, mes: message.promptText ?? message.mes }));
       let aborted = false;
       runtime.forceCompaction = missingRaw.length > 0;
       await runInterceptor(source, pending.budget, () => { aborted = true; }, 'prepared', fixed);
@@ -1953,10 +2009,13 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     const result = same && complete ? original
       : textMode ? replaceTextMemory(original, previous, desired, formatTextMemory) : replaceChatMemory(original, previous, desired);
     matches = locate(result, desired);
+    inspection = inspectConversation(result, desired, getChatMemory().blocks, textMode);
     if (missingHistory(desired, matches).length || desired.some((message, index) => isSynthetic(message) && !matches.has(index))) {
       throw new LocalizedError(msg('Memory or recent history is missing from the prompt. Check the chat history marker and prompt settings.'));
     }
     const actual = await count(result) + extraTokens;
+    const finalInspection = textMode ? inspection : await inspectChatPrompt(result, desired, getChatMemory().blocks, native || [], count, countTextTokens);
+    const counted = await countCoreChat(desired);
     if (pending.memorySnapshot !== memoryPromptSnapshot()) throw new LocalizedError(msg('Memory changed during context preparation. Start generation again.'));
     if (actual > pending.budget) throw new LocalizedError(msg`Context exceeds the budget by ${actual - pending.budget} tokens.`);
     if (pending.chatId !== String(getCurrentChatId()) || !fingerprintsStillMatch(pending.fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
@@ -1968,7 +2027,7 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     }])));
     pending.outgoing = desired;
     pending.prepared = true;
-    const counted = await countCoreChat(desired);
+    pending.inspection = finalInspection;
     const finalFixed = Math.max(0, actual - sumTokens(counted));
     runtime.fixedPromptTokensByChat.set(pending.chatId, finalFixed);
     runtime.passivePromptDirty = false;
@@ -1979,10 +2038,14 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
       raw: sumTokens(counted.filter(entry => !isSynthetic(entry.message))),
       other: finalFixed, otherKnown: true, triggerRatio: getSettings().triggerRatio, automatic: getSettings().enabled,
     }));
-    recordDiagnostic('prompt-ready', { mode: textMode ? 'text' : 'chat', tokens: actual, budget: pending.budget, repaired: result !== original, memoryMessages: desired.filter(isSynthetic).length, rawMessages: desired.filter(message => !isSynthetic(message)).length });
+    recordDiagnostic('prompt-ready', { requestId: pending.requestId, phase, mode: textMode ? 'text' : 'chat', tokens: actual, budget: pending.budget, repaired: result !== original,
+      inventory: pending.inspection.inventory, missing: pending.inspection.missing, components: pending.inspection.components, excluded: pending.excluded,
+      memoryMessages: desired.filter(isSynthetic).length, rawMessages: desired.filter(message => !isSynthetic(message)).length });
   } catch (error) {
     setStatus('error', error);
-    recordDiagnostic('prompt-blocked', { code: error.translationKey || error.name });
+    recordDiagnostic('prompt-blocked', { requestId: pending.requestId, phase, code: error.translationKey || error.name,
+      values: error.diagnosticValues, budget: pending.budget, environment: diagnosticEnvironment(),
+      inventory: inspection.inventory, missing: inspection.missing, excluded: pending.excluded });
     runtime.pendingPromptMeasurement = null;
     getContext().stopGeneration();
   } finally { runtime.preparingPrompt = false; }
@@ -1998,10 +2061,14 @@ function captureTextFormatting(data) {
 
 async function prepareChatSettings(payload) {
   if (!runtime.pendingPromptMeasurement?.prepared || runtime.summarizing || !Array.isArray(payload.messages)) return;
-  const extra = payload.tools?.length ? await getTokenCountAsync(JSON.stringify(payload.tools), 0) : 0;
-  await prepareFinalPrompt({ chat: payload.messages }, false, extra);
+  const extra = payload.tools?.length ? await countTextTokens(JSON.stringify(payload.tools)) : 0;
+  await prepareFinalPrompt({ chat: payload.messages }, false, extra, true);
   if (!runtime.pendingPromptMeasurement) return;
-  recordDiagnostic('chat-request', { stream: payload.stream === true, messages: payload.messages.length, maxTokens: payload.max_tokens, tools: payload.tools?.length || 0, provider: payload.chat_completion_source });
+  const pending = runtime.pendingPromptMeasurement;
+  recordDiagnostic('chat-request', { requestId: pending.requestId, phase: 'dispatch', delivery: 'handed-to-tavern',
+    stream: payload.stream === true, messages: payload.messages.length, maxTokens: payload.max_tokens, tools: payload.tools?.length || 0, toolTokens: extra,
+    provider: diagnosticName(payload.chat_completion_source), model: diagnosticName(payload.model), environment: diagnosticEnvironment(),
+    inventory: pending.inspection.inventory, components: pending.inspection.components, excluded: pending.excluded });
 }
 
 async function prepareTextRequest(data, dryRun) {
@@ -2011,6 +2078,9 @@ async function prepareTextRequest(data, dryRun) {
   const event = { prompt: data[field] };
   await prepareFinalPrompt(event, true, 0, true);
   data[field] = event.prompt;
+  const pending = runtime.pendingPromptMeasurement;
+  if (pending?.prepared) recordDiagnostic('text-request', { requestId: pending.requestId, phase: 'dispatch', delivery: 'handed-to-tavern',
+    chars: event.prompt.length, inventory: pending.inspection.inventory, environment: diagnosticEnvironment(), excluded: pending.excluded });
 }
 
 function prepareChatEvent(data) { return prepareFinalPrompt(data, false, 0, false, nativeContext.snapshot()); }

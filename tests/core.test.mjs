@@ -257,12 +257,12 @@ test('deleting an active rollup safely restores its retired children', () => {
   assert.deepEqual(getActiveFrontier(result.memory).blocks.map(block => block.id), ['l1-a', 'l1-b']);
 });
 
-test('deleting a retired child also removes dependent rollups and exposes raw history after the gap', () => {
+test('deleting a retired child exposes its raw range and preserves the other child', () => {
   const result = deleteMemoryBlock(dependencyMemory(), 'l1-a');
   assert.deepEqual(new Set(result.removedIds), new Set(['l1-a', 'l2']));
   assert.deepEqual(result.reactivatedIds, ['l1-b']);
-  assert.deepEqual(result.staleIds, ['l1-b']);
-  assert.equal(getActiveFrontier(result.memory).blocks.length, 0);
+  assert.deepEqual(result.staleIds, []);
+  assert.deepEqual(getActiveFrontier(result.memory).blocks.map(block => block.id), ['l1-b']);
 });
 
 test('editing a retired child invalidates its rollup and reactivates the editable source tier', () => {
@@ -593,11 +593,11 @@ test('covered range supports a block ending at index zero', () => {
   assert.equal(getCoveredThrough([{ status: 'active', sourceTo: 0 }]), 0);
 });
 
-test('a broken active frontier never hides messages across a source gap', () => {
+test('active coverage includes independent blocks on both sides of a source gap', () => {
   const frontier = getActiveFrontier([
     { id: 'a', status: 'active', sourceFrom: 0, sourceTo: 9 },
     { id: 'gap', status: 'active', sourceFrom: 20, sourceTo: 29 },
   ]);
-  assert.deepEqual(frontier.blocks.map(block => block.id), ['a']);
-  assert.equal(frontier.coveredThrough, 9);
+  assert.deepEqual(frontier.blocks.map(block => block.id), ['a', 'gap']);
+  assert.equal(frontier.coveredThrough, 29);
 });
