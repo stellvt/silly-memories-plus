@@ -110,6 +110,8 @@
   "smp.Chat changed before memory commit": "Чат сменился перед сохранением памяти",
   "smp.Saved L1 and L${0}: ${1} → ${2}t, tier ${3} → ${4}t.": "Сохранены L1 и L${0}: ${1} → ${2}т; уровень: ${3} → ${4}т.",
   "smp.Created L1 block: ${0} → ${1} tokens.": "Создан блок L1: ${0} → ${1} токенов.",
+  "smp.Created ${0} L1 blocks: ${1} → ${2} tokens.": "Создано блоков L1: ${0}; ${1} → ${2} токенов.",
+  "smp.Summarizing part ${0}/${1}: ${2} → ~${3} tokens.": "Сжатие части ${0}/${1}: ${2} → ~${3} токенов.",
   "smp.Created L${0} rollup: ${1} → ${2} tokens.": "Создано объединение L${0}: ${1} → ${2} токенов.",
   "smp.Memory source changed; active blocks marked stale.": "Исходник памяти изменился; активные блоки помечены устаревшими.",
   "smp.Memory preflight failed: ${0}": "Ошибка подготовки памяти: ${0}",

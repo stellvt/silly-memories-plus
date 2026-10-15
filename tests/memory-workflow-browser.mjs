@@ -14,7 +14,7 @@ assert.ok(directory && process.env.SMP_BROWSER_EXECUTABLE);
 await mkdir(directory, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.SMP_BROWSER_EXECUTABLE, headless: true });
 const page = await browser.newPage({ viewport: { width: 1000, height: 1100 } });
-await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save/, route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save|\/api\/settings\/save/, route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
 const results = [];
 let failure = null;
 try {
@@ -43,9 +43,10 @@ try {
     const stored = Array.from({ length: 5 }, (_, index) => ({ name: 'Mira', mes: `Original source ${index}: the observatory key changed hands.`, is_user: index % 2 === 0, is_system: false, extra: {} }));
     context.chat.splice(0, context.chat.length, ...stored);
     context.chatMetadata.silly_memories_plus = structuredClone(memory);
-    context.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'workflow-e2e', summaryInputBudgetTokens: 50000 });
+    context.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'workflow-e2e', summaryInputBudgetTokens: 50000, language: 'en' });
     globalThis.workflow = { context, script, service, memory, structured, calls: [], mode: 'ok', pending: null, stored };
     service.getProfile = () => ({ id: 'workflow-e2e' });
+    service.getSupportedProfiles = () => [{ id: 'workflow-e2e', name: 'Workflow test' }];
     service.validateProfile = () => ({ selected: 'openai' });
     service.sendRequest = async (profile, messages, maxTokens, options) => {
       workflow.calls.push({ messages, stream: options.stream });
@@ -63,6 +64,8 @@ try {
     document.body.append(root);
     root.style.cssText = 'display:block;position:fixed;inset:0 auto auto 0;width:430px;max-height:100vh;overflow:auto;background:#202225;z-index:99999';
     root.querySelector('.inline-drawer-content').style.display = 'block';
+    document.getElementById('smp-language').value = 'en';
+    document.getElementById('smp-language').dispatchEvent(new Event('change', { bubbles: true }));
     document.getElementById('smp-refresh').click();
   });
   async function check(name, run) {
@@ -82,7 +85,7 @@ try {
       workflow.context.chatMetadata.silly_memories_plus = structuredClone(workflow.memory);
       workflow.context.chat.splice(0, workflow.context.chat.length, ...structuredClone(workflow.stored));
       const core = await import('/scripts/extensions/third-party/silly-memories-plus/lib/core.mjs');
-      workflow.context.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'workflow-e2e', summaryInputBudgetTokens: 50000 });
+      workflow.context.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'workflow-e2e', summaryInputBudgetTokens: 50000, language: 'en' });
       workflow.mode = 'ok'; workflow.calls.length = 0;
       workflow.pending = null;
       await workflow.script.eventSource.emit(workflow.script.event_types.CHAT_CHANGED);

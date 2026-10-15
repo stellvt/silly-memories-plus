@@ -6,9 +6,9 @@ A SillyTavern extension for hierarchical chat history summarization.
 
 A model turns older messages into a summary of events and notes about relationships, items, promises, and other important details. This memory is sent alongside recent messages. The full conversation stays in your chat, and you can review and edit the memory blocks.
 
-When enabled, Silly Memories owns the Chat Completion history budget: Tavern no longer drops older messages before extension preflight. The prompt manager header displays `Managed by Silly Memories`. Your configured context window and response limit still apply, and the final request is checked before dispatch. Disabling the extension restores native budget management.
+When enabled, Silly Memories manages the Chat Completion history budget. The prompt manager header displays `Silly`. The extension checks the assembled request against your configured context window and response limit before dispatch. When disabled, Tavern manages the context.
 
-Opening a chat also checks archived blocks invalidated by older versions. Recovery makes no model requests and requires the saved source hash to match the complete current source range. Changed sources, ambiguous rollups and unverifiable blocks stay archived. Editing one source no longer invalidates all memory, and archived blocks retain their source fingerprints.
+Opening a chat checks each memory block's source. An archived block can be restored when its saved hash matches the complete source range. Each block is checked independently; changed or unverifiable blocks stay archived.
 
 ## Installation and first setup
 
@@ -20,6 +20,8 @@ Opening a chat also checks archived blocks invalidated by older versions. Recove
 6. Open a chat. Automatic compaction is enabled by default; you can start with the default settings.
 
 To run it manually, click **Summarize history** under **Runtime and maintenance**. Task progress appears above the submenus, next to **Stop task**.
+
+Manual compaction divides older history into parts and saves each as a separate L1 block. Instructions and the response reserve are subtracted from the input budget; the source uses 90% of the remaining space. Parts end at message boundaries. A single message exceeding the budget is summarized in pieces within one block. Each completed block is saved immediately. Recent history stays in full.
 
 ## How memory works
 

@@ -56,6 +56,7 @@ import {
   formatRawSources,
   formatSummarySources,
   getSummarySourceBudget,
+  partitionRawEntries,
   splitOversizedRawEntries,
 } from './lib/summarizer.mjs';
 import {
@@ -521,9 +522,14 @@ async function createBlock({ level, sourceEntries = [], childBlocks = [], target
   });
   let groups;
   if (isRaw) {
-    const sourceUnits = await splitOversizedRawEntries(sourceEntries, inputBudget, countTokens);
-    const units = await Promise.all(sourceUnits.map(async unit => ({ ...unit, tokens: await countTokens(formatRawSources([unit])) })));
-    groups = chunkByTokenBudget(units, Math.floor(inputBudget * 0.9)).map(formatRawSources);
+    const prompt = formatRawSources(sourceEntries);
+    if (await countTokens(prompt) <= Math.floor(inputBudget * 0.9)) {
+      groups = [prompt];
+    } else {
+      const sourceUnits = await splitOversizedRawEntries(sourceEntries, inputBudget, countTokens);
+      const units = await Promise.all(sourceUnits.map(async unit => ({ ...unit, tokens: await countTokens(formatRawSources([unit])) })));
+      groups = chunkByTokenBudget(units, Math.floor(inputBudget * 0.9)).map(formatRawSources);
+    }
   } else {
     const prompt = formatSummarySources(childBlocks);
     groups = await countTokens(prompt) <= Math.floor(inputBudget * 0.9) ? [prompt]
@@ -1107,7 +1113,7 @@ function assertPinnedFactsCurrent(memory, chatId) {
   }
 }
 
-async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens) {
+async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, force) {
   runtime.abortController = new AbortController();
   runtime.activeCompactionChatId = chatId;
   try {
@@ -1117,15 +1123,32 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
       contextBudget: contextSize,
       fixedPromptTokens: fixedPromptTokens + pinnedTokens,
       settings,
+      force,
+      partitionRawSource: force ? async (entries, targetTokens) => {
+        const countTokens = text => {
+          runtime.abortController.signal.throwIfAborted();
+          return countTextTokens(text);
+        };
+        const { sourceBudget } = await getSummarySourceBudget({ settings, stage: 'raw', targetTokens, level: 1, countTokens });
+        const batchBudget = Math.floor(sourceBudget * 0.9);
+        const groups = await partitionRawEntries(entries, batchBudget, countTokens);
+        recordDiagnostic('raw-batches', { requestId: runtime.diagnosticRequestId, inputBudget: settings.summaryInputBudgetTokens, sourceBudget, batchBudget,
+          blocks: groups.map(source => ({ from: source[0].index, to: source.at(-1).index, sourceTokens: sumTokens(source) })) });
+        return groups;
+      } : undefined,
       createBlock,
       validateBlock: (block, label) => {
         if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
         assertBlockSourceStillCurrent(block, chatId, label);
       },
-      onStage: ({ kind, plan: stagePlan, level }) => {
+      onStage: ({ kind, plan: stagePlan, level, batchIndex, batchCount }) => {
         if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
+        recordDiagnostic('compaction-stage', { requestId: runtime.diagnosticRequestId, kind, level, batchIndex, batchCount,
+          sourceIndices: stagePlan.source?.map(entry => entry.index), childIds: stagePlan.blocks?.map(block => block.id), targetTokens: stagePlan.targetTokens });
         if (kind === 'raw') {
-          setStatus('working', msg`Compacting ${stagePlan.sourceTokens} raw tokens into ~${stagePlan.targetTokens}.`);
+          setStatus('working', batchCount > 1
+            ? msg`Summarizing part ${batchIndex}/${batchCount}: ${stagePlan.sourceTokens} → ~${stagePlan.targetTokens} tokens.`
+            : msg`Compacting ${stagePlan.sourceTokens} raw tokens into ~${stagePlan.targetTokens}.`);
         } else {
           setStatus('working', msg`Rolling ${stagePlan.blocks.length} memory blocks into L${level}.`);
         }
@@ -1149,13 +1172,17 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
     assertPinnedFactsCurrent(result.memory, chatId);
     updateContextFromPlan(result.finalPlan, contextSize, pinnedTokens);
     updateStats(result.memory);
-    if (result.rawBlock && result.rollupBlock) {
+    const rawSourceTokens = result.rawBlocks.reduce((sum, block) => sum + block.sourceTokens, 0);
+    const rawSummaryTokens = sumTokens(result.rawBlocks);
+    if (result.rawBlocks.length && result.rollupBlock) {
       setStatus(
         'success',
-        msg`Saved L1 and L${result.rollupBlock.level}: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens}t, tier ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens}t.`,
+        msg`Saved L1 and L${result.rollupBlock.level}: ${rawSourceTokens} → ${rawSummaryTokens}t, tier ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens}t.`,
       );
-    } else if (result.rawBlock) {
-      setStatus('success', msg`Created L1 block: ${result.rawBlock.sourceTokens} → ${result.rawBlock.summaryTokens} tokens.`);
+    } else if (result.rawBlocks.length > 1) {
+      setStatus('success', msg`Created ${result.rawBlocks.length} L1 blocks: ${rawSourceTokens} → ${rawSummaryTokens} tokens.`);
+    } else if (result.rawBlocks.length) {
+      setStatus('success', msg`Created L1 block: ${rawSourceTokens} → ${rawSummaryTokens} tokens.`);
     } else if (result.rollupBlock) {
       setStatus(
         'success',
@@ -1258,7 +1285,7 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
     updateManualRollupControls();
     const chatId = getCurrentChatId();
     try {
-      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens);
+      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, type === 'manual');
     } catch (error) {
       const errorText = error;
       if (runtime.cancelRequested) {
