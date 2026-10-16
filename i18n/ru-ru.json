@@ -248,5 +248,6 @@
   "smp.Download logs": "Скачать логи",
   "smp.Debug": "Отладка",
   "smp.Memory changed during context preparation. Start generation again.": "Память изменилась во время подготовки контекста. Запустите генерацию снова.",
+  "smp.Context changed during token counting. Start generation again.": "Контекст изменился во время подсчёта токенов. Запустите генерацию снова.",
   "smp.Memory or recent history is missing from the prompt. Check the chat history marker and prompt settings.": "В запросе отсутствует память или свежая история. Проверьте маркер истории чата и настройки промптов."
 }
