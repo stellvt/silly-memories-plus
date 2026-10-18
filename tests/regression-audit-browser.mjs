@@ -79,7 +79,7 @@ try {
       c.characters.at(-1).chat = `audit-${++audit.serial}`;
       c.chat.splice(0, c.chat.length, ...texts.map((mes, index) => ({ name: index % 2 ? 'User' : 'Mira', mes, is_user: Boolean(index % 2), is_system: false, extra: {} })));
       c.chatMetadata.silly_memories_plus = core.createEmptyMemory(); audit.calls = []; audit.modelGate = null;
-      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'audit', blockTargetTokens: 512, minimumSourceTokens: 512, summaryInputBudgetTokens: 50000, summaryMaxOutputTokens: 2048, language: 'en' });
+      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ messageValidation: 'content', summaryProfileId: 'audit', blockTargetTokens: 512, minimumSourceTokens: 512, summaryInputBudgetTokens: 50000, summaryMaxOutputTokens: 2048, language: 'en' });
       Object.assign(openai.oai_settings, { chat_completion_source: 'openai', openai_model: 'gpt-4o-mini', openai_max_context: 8512, openai_max_tokens: 512, names_behavior: 0 });
       await script.eventSource.emit(script.event_types.GENERATION_ENDED);
       await script.eventSource.emit(script.event_types.CHAT_CHANGED);

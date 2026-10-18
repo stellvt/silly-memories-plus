@@ -18,6 +18,9 @@ const browser = await chromium.launch({ executablePath: process.env.SMP_BROWSER_
 const page = await browser.newPage({ viewport: { width: 1100, height: 1000 } });
 await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save|\/api\/settings\/save/, route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
 const results = [];
+// Full-disable failures: memory/facts leak, native clipping stays disabled, an
+// oversized request is blocked by our guard, background builds continue, manual
+// jobs run, late summary results are committed, or re-enabling loses saved data.
 let failure;
 try {
   await page.goto(process.env.SMP_BASE_URL || 'http://127.0.0.1:8001');
@@ -64,7 +67,7 @@ try {
       c.chat.splice(0, c.chat.length, ...texts.map((mes, index) => ({ name: index % 2 ? 'User' : 'Mira', mes, is_user: index % 2 === 1, extra: {}, swipe_id: 0, swipes: [mes], swipe_info: [{ extra: {} }] })));
       c.chatMetadata.silly_memories_plus = { schemaVersion: 3, blocks };
       c.chatMetadata.variables = {};
-      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'ownership-test', blockTargetTokens: 256, minimumSourceTokens: 512, summaryInputBudgetTokens: 50000 });
+      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ messageValidation: 'content', summaryProfileId: 'ownership-test', blockTargetTokens: 256, minimumSourceTokens: 512, summaryInputBudgetTokens: 50000 });
       Object.assign(openai.oai_settings, { chat_completion_source: 'openai', openai_model: 'gpt-4o-mini', openai_max_context: budget + 512, openai_max_tokens: 512, stream_openai: false, squash_system_messages: false, names_behavior: 0, reasoning_effort: 'medium' });
       c.powerUserSettings.token_padding = 64;
       co.calls = []; co.requests = []; co.stops = 0;
@@ -229,6 +232,62 @@ try {
   await check('manager-label-is-header-only-with-native-history-counter', labels.header === 'Silly' && labels.nativeCount !== undefined && !labels.active.includes('Silly') && !labels.disabled.includes('Silly'), labels);
   await check('native-history-counter-fits-320px', !labels.overflow, labels);
   await page.locator('[data-pm-identifier="chatHistory"]').screenshot({ path: resolve(directory, 'managed-history-row.png') });
+  const disabled = await page.evaluate(async () => {
+    await co.reset(['PRIVATE-ORIGINAL', 'Recent', 'Latest']);
+    co.c.chatMetadata.silly_memories_plus.blocks = [co.block('disabled-memory', 0, 0)];
+    co.c.chatMetadata.silly_memories_plus.pinnedFacts = 'PRIVATE-PINNED';
+    const saved = JSON.stringify(co.core.normalizeMemory(co.c.chatMetadata.silly_memories_plus));
+    const control = document.getElementById('smp-enabled');
+    const validation = document.getElementById('smp-message-validation');
+    validation.value = 'presence'; validation.dispatchEvent(new Event('change', { bubbles: true }));
+    const validationSaved = co.c.extensionSettings.silly_memories_plus.messageValidation === 'presence' && co.core.normalizeSettings().messageValidation === 'presence';
+    control.checked = false; control.dispatchEvent(new Event('change', { bubbles: true }));
+    let aborted = false;
+    const outgoing = co.c.chat.map((message, index) => ({ ...message, index }));
+    const before = JSON.stringify(outgoing);
+    await sillyMemoriesPlusGenerateInterceptor(outgoing, 1, () => { aborted = true; }, 'normal');
+    await sillyMemoriesPlusGenerateInterceptor(outgoing, 1, () => { aborted = true; }, 'manual');
+    const result = await co.build();
+    await co.script.sendGenerationRequest('normal', { prompt: result.chat });
+    await co.openai.promptManager.renderPromptManager();
+    const header = co.openai.promptManager.containerElement.querySelector('.completion_prompt_manager_header')?.lastElementChild.textContent;
+    const native = new co.openai.ChatCompletion(); native.setTokenBudget(1234, 0);
+    return { unchanged: JSON.stringify(outgoing) === before && JSON.stringify(co.c.chatMetadata.silly_memories_plus) === saved,
+      noInjection: !JSON.stringify(co.requests.at(-1)?.messages).includes('memory_block') && !JSON.stringify(co.requests.at(-1)?.messages).includes('PRIVATE-PINNED'),
+      raw: JSON.stringify(co.requests.at(-1)?.messages).includes('PRIVATE-ORIGINAL'), nativeBudget: native.tokenBudget,
+      aborted, stops: co.stops, calls: co.calls.length, header, controlInSummarizer: control.closest('[data-section]')?.dataset.section === 'summarizer',
+      validationSaved, manualDisabled: document.getElementById('smp-compact-now').disabled && document.getElementById('smp-test-summarizer').disabled };
+  });
+  await check('disabled-is-native-tavern-without-memory-or-guards', disabled.unchanged && disabled.noInjection && disabled.raw && disabled.nativeBudget === 1234 && !disabled.aborted && !disabled.stops && !disabled.calls && disabled.header !== 'Silly' && disabled.controlInSummarizer && disabled.manualDisabled && disabled.validationSaved, disabled);
+  let dryRuns = 0;
+  const watchDryRun = request => { if (request.url().includes('/api/backends/chat-completions/generate')) dryRuns++; };
+  page.on('request', watchDryRun);
+  await page.evaluate(async () => {
+    co.idleBefore = co.diagnostics.exportDiagnostics(co.c.extensionSettings.silly_memories_plus, null).events.filter(event => ['prompt-estimate', 'prompt-estimate-rejected'].includes(event.type)).length;
+    await co.script.eventSource.emit(co.script.event_types.GENERATION_ENDED);
+    await co.script.eventSource.emit(co.script.event_types.SETTINGS_UPDATED);
+  });
+  await page.waitForTimeout(1200);
+  await check('disabled-does-not-build-background-prompts', await page.evaluate(() => co.diagnostics.exportDiagnostics(co.c.extensionSettings.silly_memories_plus, null).events.filter(event => ['prompt-estimate', 'prompt-estimate-rejected'].includes(event.type)).length === co.idleBefore) && dryRuns === 0);
+  page.off('request', watchDryRun);
+  const restored = await page.evaluate(async () => {
+    const control = document.getElementById('smp-enabled'); control.checked = true; control.dispatchEvent(new Event('change', { bubbles: true }));
+    co.requests = []; co.stops = 0;
+    const result = await co.build();
+    const body = JSON.stringify(result.chat);
+    return !result.aborted && !co.stops && body.includes('MEMORY-disabled-memory') && body.includes('PRIVATE-PINNED') && !body.includes('PRIVATE-ORIGINAL');
+  });
+  await check('reenabling-restores-saved-memory-and-facts', restored);
+  const cancelled = await page.evaluate(async () => {
+    await co.reset([' old-scene'.repeat(4000), ' recent'.repeat(100), ' latest'.repeat(100)], [], 4000);
+    co.service.sendRequest = async () => {
+      const control = document.getElementById('smp-enabled'); control.checked = false; control.dispatchEvent(new Event('change', { bubbles: true }));
+      return { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ title: 'Discard', ...co.structured('Late summary result.') }) } }] };
+    };
+    await co.build(4000);
+    return co.c.chatMetadata.silly_memories_plus.blocks.length === 0;
+  });
+  await check('disabling-discards-in-flight-summary-results', cancelled);
   await page.locator('#smp-settings').screenshot({ path: resolve(directory, 'context-ui.png') });
   assert.ok(results.every(result => result.passed), 'One or more context ownership checks failed');
 } catch (error) { failure = String(error.stack || error); }

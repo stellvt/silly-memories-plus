@@ -15,6 +15,11 @@ import { resolve } from 'node:path';
 // - a large damaged reply is compacted instead of blocked, including copied data;
 // - transport-only changes break SSE or skip validation; passive counts differ;
 // - matching changes stored text/fingerprints, evaluates macros again, or leaks text.
+// Presence-mode failures: changed text/code is rejected despite proven identity;
+// missing/reordered messages or corrupted memory pass; a merged history match
+// consumes preset/lore; copied history changes lose bounded association; passive
+// counts charge changed history to Other; strict mode loses its content checks.
+const validation = process.env.SMP_MESSAGE_VALIDATION || 'content';
 const require = createRequire(import.meta.url);
 const { chromium } = require(resolve(process.env.CODEX_NODE_MODULES, 'playwright'));
 const directory = process.env.SMP_ARTIFACT_DIR;
@@ -32,7 +37,7 @@ try {
     const { loader } = await import('/scripts/action-loader.js');
     return SillyTavern.getContext().characters.length > 0 && !loader.active().some(handle => handle.slug === 'app-init');
   });
-  await page.evaluate(async () => {
+  await page.evaluate(async validation => {
     const script = await import('/script.js');
     const openai = await import('/scripts/openai.js');
     const core = await import('/scripts/extensions/third-party/silly-memories-plus/lib/core.mjs');
@@ -47,7 +52,7 @@ try {
     script.setCharacterId(c.characters.length - 1); script.setCharacterName('Mira'); script.changeMainAPI('openai');
     openai.promptManager.activeCharacter = { id: openai.promptManager.configuration.promptOrder.dummyId };
     const structured = narrative => ({ title: 'Observatory', narrative, relationships: [], importantItems: [], characterStates: [], locations: [], commitments: [], openThreads: [], resolvedThreads: [], worldFacts: [], exactTerms: [] });
-    globalThis.pm = { script, openai, core, identity, diagnostics, c, serial: 0, requests: [], calls: [], stops: 0, mutation: null, transport: null, passive: null, structured, countTokensOpenAIAsync, getTokenCountAsync };
+    globalThis.pm = { validation, script, openai, core, identity, diagnostics, c, serial: 0, requests: [], calls: [], stops: 0, mutation: null, transport: null, passive: null, structured, countTokensOpenAIAsync, getTokenCountAsync };
     pm.memoryState = () => JSON.stringify({ facts: c.chatMetadata.silly_memories_plus.pinnedFacts,
       blocks: c.chatMetadata.silly_memories_plus.blocks.map(({ id, status, sourceFrom, sourceTo, sourceHash, children, structured }) => ({ id, status, sourceFrom, sourceTo, sourceHash, children, structured })) });
     service.getProfile = () => ({ id: 'matching-test' }); service.validateProfile = () => ({ selected: 'openai' });
@@ -92,7 +97,7 @@ try {
       if (scenario === 'visible-html') c.chat[2].mes += '<strong>Never surrender the key.</strong>';
       c.chatMetadata.silly_memories_plus = core.createEmptyMemory(); c.chatMetadata.variables = {};
       c.extensionSettings.regex = [];
-      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ debug: true, language: 'en', summaryProfileId: 'matching-test', blockTargetTokens: 256, minimumSourceTokens: 512 });
+      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ messageValidation: validation, debug: true, language: 'en', summaryProfileId: 'matching-test', blockTargetTokens: 256, minimumSourceTokens: 512 });
       Object.assign(openai.oai_settings, { chat_completion_source: 'openai', openai_model: 'gpt-4o-mini', openai_max_context: budget + 512, openai_max_tokens: 512, names_behavior: 0, squash_system_messages: scenario.startsWith('squashed'), stream_openai: true });
       if (scenario.startsWith('squashed')) for (const m of c.chat) m.extra.type = 'narrator';
       if (scenario === 'native-impostor') c.chat[0].extra.type = 'narrator';
@@ -115,13 +120,15 @@ try {
       const [chat] = await openai.prepareOpenAIMessages({ name2: 'Mira', charDescription: 'PRIVATE-PRESET An archivist.' + quoted, charPersonality: '', scenario: '', worldInfoBefore: 'PRIVATE-LORE The tower is locked.', worldInfoAfter: '', bias: '', type: 'normal', quietPrompt: '', extensionPrompts: {}, cyclePrompt: '', systemPromptOverride: '', jailbreakPromptOverride: '', messages: openai.setOpenAIMessages(outgoing), messageExamples: [] }, false);
       return { chat, aborted };
     };
-  });
+  }, validation);
   const scenarios = ['unchanged', 'line-runs', 'edge-space', 'comments', 'combined', 'copied', 'consecutive', 'duplicates', 'media-tools', 'squashed', 'transport-only', 'late-compaction', 'words-deleted', 'words-replaced', 'visible-html', 'role-changed', 'removed', 'reordered', 'ambiguous', 'unclosed-comment', 'memory-changed', 'facts-changed', 'native-impostor', 'code-comment', 'code-space', 'long-loss', 'long-loss-copied', 'squashed-memory-changed'];
+  if (validation === 'presence') scenarios.push('rewrite', 'rewrite-copied', 'squashed-rewrite', 'transport-rewrite');
   for (const scenario of scenarios.filter(scenario => !process.env.SMP_SCENARIOS || process.env.SMP_SCENARIOS.split(',').includes(scenario))) {
     const result = await page.evaluate(async scenario => {
       const budget = scenario === 'late-compaction' ? 12000 : 16000;
       await pm.reset(scenario, budget);
-      const blocked = ['words-deleted', 'words-replaced', 'visible-html', 'role-changed', 'removed', 'reordered', 'ambiguous', 'unclosed-comment', 'native-impostor', 'code-comment', 'code-space', 'squashed-memory-changed'].includes(scenario) || scenario.startsWith('long-loss');
+      const blocked = ['role-changed', 'removed', 'reordered', 'ambiguous', 'native-impostor', 'squashed-memory-changed'].includes(scenario)
+        || pm.validation === 'content' && (['words-deleted', 'words-replaced', 'visible-html', 'unclosed-comment', 'code-comment', 'code-space'].includes(scenario) || scenario.startsWith('long-loss'));
       const modify = data => {
         const list = data.chat || data.messages;
         let at = list.findIndex(m => typeof m.content === 'string' && m.content.includes('PRIVATE-STORY:'));
@@ -129,7 +136,12 @@ try {
         if (scenario === 'facts-changed') at = list.findIndex(m => typeof m.content === 'string' && m.content.includes('PRIVATE-FACT:'));
         if (at < 0) return;
         const message = list[at];
-        if (scenario === 'line-runs') message.content = message.content.replace(/\n{3,}/g, '\n\n');
+        if (['rewrite', 'rewrite-copied', 'transport-rewrite'].includes(scenario)) {
+          message.content = 'PRIVATE-REWRITTEN: A replacement by another extension.';
+          if (scenario === 'rewrite-copied') list.splice(0, list.length, ...structuredClone(list));
+        }
+        else if (scenario === 'squashed-rewrite') message.content = message.content.replace('Mira kept the brass key.', 'Mira returned the key to Rowan.');
+        else if (scenario === 'line-runs') message.content = message.content.replace(/\n{3,}/g, '\n\n');
         else if (scenario === 'edge-space') message.content = message.content.trim();
         else if (scenario === 'comments') message.content = message.content.replace(/\s*<!--[\s\S]*?-->/g, '');
         else if (scenario === 'words-deleted') message.content = message.content.replace('brass key', '');
@@ -166,7 +178,7 @@ try {
         if (scenario === 'late-compaction') list.unshift({ role: 'system', content: 'PRIVATE-LATE-LORE ' + ' lore-token'.repeat(3200) });
         if (!blocked) list.splice(1, 0, { role: 'system', content: 'PRIVATE-INJECTION Preserve this.' });
       };
-      if (scenario !== 'transport-only') pm.mutation = modify;
+      if (!['transport-only', 'transport-rewrite'].includes(scenario)) pm.mutation = modify;
       else pm.transport = modify;
       const built = await pm.build(budget);
       let output = '', error = null;
@@ -183,7 +195,7 @@ try {
       const checks = {
         dispatched: pm.requests.length === 1 && output === 'matched stream' && !pm.stops,
         blocked: pm.requests.length === 0 && pm.stops > 0 && own.some(e => e.type === 'prompt-blocked'),
-        noUnsafeCompaction: !scenario.startsWith('long-loss') || pm.calls.length === 0 && pm.memoryState() === pm.memoryOriginal,
+        noUnsafeCompaction: !blocked || !scenario.startsWith('long-loss') || pm.calls.length === 0 && pm.memoryState() === pm.memoryOriginal,
         impostor: scenario !== 'native-impostor' || own.some(e => e.type === 'prompt-blocked' && e.missing?.some(m => m.index === 0)),
         storedUnchanged: unchangedSource,
         preset: body.includes('PRIVATE-PRESET') && body.includes('PRIVATE-LORE'),
@@ -224,7 +236,8 @@ try {
   await page.waitForFunction(chat => pm.diagnostics.exportDiagnostics(pm.c.extensionSettings.silly_memories_plus, null).events.some(e => e.chat === chat && ['prompt-estimate', 'prompt-estimate-rejected'].includes(e.type)), badChat);
   const damaged = await page.evaluate(chat => {
     const own = pm.diagnostics.exportDiagnostics(pm.c.extensionSettings.silly_memories_plus, null).events.filter(e => e.chat === chat);
-    return { passed: own.some(e => e.type === 'prompt-estimate-rejected' && e.messages?.some(m => m.index === 2)) && !own.some(e => e.type === 'prompt-estimate') && pm.calls.length === 0 && pm.requests.length === 0 && pm.memoryState() === pm.memoryOriginal, events: own };
+    const measured = own.find(e => e.type === 'prompt-estimate');
+    return { passed: (pm.validation === 'presence' ? measured?.included === measured?.expected && Boolean(measured) : own.some(e => e.type === 'prompt-estimate-rejected' && e.messages?.some(m => m.index === 2)) && !measured) && pm.calls.length === 0 && pm.requests.length === 0 && pm.memoryState() === pm.memoryOriginal, events: own };
   }, badChat);
   results.push({ scenario: 'passive-damaged-is-not-fixed-overhead', ...damaged });
   const exported = await page.evaluate(() => pm.diagnostics.exportDiagnostics(pm.c.extensionSettings.silly_memories_plus, null));

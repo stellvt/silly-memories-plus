@@ -177,7 +177,7 @@ try {
   await check('block-delete-preserves-facts', await page.evaluate(() => pinsTest.context.chatMetadata.silly_memories_plus.pinnedFacts.includes('pinned')));
   await reset({ facts, enabled: false });
   const disabled = await generate();
-  await check('facts-work-with-auto-compaction-off', !disabled.aborted && disabled.outgoing.some(x => x.extra?.sillyMemoriesPlusPinnedFacts) && await page.evaluate(() => pinsTest.calls.length === 0));
+  await check('disabled-keeps-facts-stored-without-sending-them', !disabled.aborted && !disabled.outgoing.some(x => x.extra?.sillyMemoriesPlusPinnedFacts) && disabled.facts === facts && await page.evaluate(() => pinsTest.calls.length === 0));
   await reset({ raw: [9000, 7000, 7000], facts: ' pinned'.repeat(6000) });
   await page.evaluate(() => { pinsTest.mode = 'wait'; });
   const racingGeneration = generate(36000);

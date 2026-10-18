@@ -8,6 +8,8 @@ A model turns older messages into a summary of events and notes about relationsh
 
 When enabled, Silly Memories manages the Chat Completion history budget. The prompt manager header displays `Silly`. The extension checks the assembled request against your configured context window and response limit before dispatch. When disabled, Tavern manages the context.
 
+The **Enable Silly Memories** switch is under **Summarizer**. When disabled, the extension creates no blocks, sends no memory or pinned facts, performs no request-budget checks, and builds no background prompts. Saved memory remains available for viewing and export.
+
 Opening a chat checks each memory block's source. An archived block can be restored when its saved hash matches the complete source range. Each block is checked independently; changed or unverifiable blocks stay archived.
 
 ## Installation and first setup
@@ -96,7 +98,7 @@ If context is over budget, switch some blocks back to summary mode, shorten pinn
 
 The preset, active lorebooks, and additional prompts are counted in the assembled request. If the first message contains macros, the remaining prompt is measured during generation. Before sending, the extension checks that memory and recent history are present. Brief notifications announce task starts, completion, and errors.
 
-In Chat Completion, other extensions can change whitespace or remove HTML comments in regular history text. Silly Memories matches messages to the conversation and counts their actual request text. Missing messages, changed content, and ambiguous matches stop the request. Code examples are checked in full.
+For Chat Completion, **Summarizer → Message validation** defaults to **Presence only**. Silly Memories tracks history messages and counts their actual request text. Other extensions may change that text. **Message content** also checks the text, allowing whitespace changes and removal of complete HTML comments outside code examples. Missing messages and ambiguous matches require verification in both modes. Memory blocks and pinned facts are checked in full.
 
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Debug → Interface language**.
 
@@ -104,7 +106,7 @@ Under **Debug**, **Download logs** saves a JSON file with message indices, block
 
 Enable **Debug logging**, repeat generation, and download the logs. Events named `text-trace` show text lengths and hashes before and after history processing, macro expansion, prompt assembly, and transport preflight. Differences include the stage, added and removed character counts, and escaped whitespace. Non-whitespace text fragments are not recorded. Inferred matches and ambiguous candidates are marked separately and do not affect request validation. The setting also enables detailed browser console output.
 
-In the context inventory, `matchBasis` identifies an exact match (`exact`) or a match with formatting changes (`formatting-equivalent`). `deltaChars` records the change in message length.
+In the context inventory, `matchBasis` identifies exact text (`exact`), formatting changes (`formatting-equivalent`), native message ownership (`native-presence`), or a position between verified neighbours (`presence-between-anchors`). `deltaChars` records the change in message length.
 
 ## Custom prompts
 

@@ -52,7 +52,7 @@ try {
       c.characters.at(-1).chat = `trace-${++tt.serial}`;
       c.chat.splice(0, c.chat.length, ...['First', 'Question', '\n\nPRIVATE-TRACE-ANSWER\n\n', 'Latest'].map((mes, index) => ({ name: index % 2 ? 'User' : 'Mira', mes, is_user: Boolean(index % 2), extra: {}, swipe_id: 0, swipes: [mes], swipe_info: [{ extra: {} }] })));
       c.chatMetadata.silly_memories_plus = core.createEmptyMemory(); c.chatMetadata.variables = {};
-      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ debug, language: 'en' });
+      c.extensionSettings.silly_memories_plus = core.normalizeSettings({ messageValidation: 'content', debug, language: 'en' });
       Object.assign(openai.oai_settings, { chat_completion_source: 'openai', openai_model: 'gpt-4o-mini', openai_max_context: 8512, openai_max_tokens: 512, names_behavior: 0, squash_system_messages: false });
       tt.mutate = null; tt.prepareMode = null; tt.nativeCalls = 0; c.extensionSettings.regex = [];
       await script.eventSource.emit(script.event_types.CHAT_CHANGED);

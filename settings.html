@@ -18,11 +18,6 @@
       <details class="smp-submenu" data-section="compaction">
         <summary><i class="fa-solid fa-compress"></i><span data-smp-i18n="Compaction policy">Compaction policy</span></summary>
         <div class="smp-submenu-content">
-          <label class="checkbox_label">
-            <input id="smp-enabled" type="checkbox">
-            <span data-smp-i18n="Enable automatic compaction">Enable automatic compaction</span>
-          </label>
-
           <div class="smp-grid">
             <label>
               <span data-smp-i18n="Compaction trigger">Compaction trigger</span>
@@ -53,7 +48,18 @@
       <details class="smp-submenu" data-section="summarizer">
         <summary><i class="fa-solid fa-wand-magic-sparkles"></i><span data-smp-i18n="Summarizer">Summarizer</span></summary>
         <div class="smp-submenu-content">
+          <label class="checkbox_label">
+            <input id="smp-enabled" type="checkbox">
+            <span data-smp-i18n="Enable Silly Memories">Enable Silly Memories</span>
+          </label>
           <div class="smp-grid">
+            <label>
+              <span data-smp-i18n="Message validation">Message validation</span>
+              <select id="smp-message-validation" class="text_pole">
+                <option value="presence" data-smp-i18n="Presence only">Presence only</option>
+                <option value="content" data-smp-i18n="Message content">Message content</option>
+              </select>
+            </label>
             <label>
               <span data-smp-i18n="Summarizer input budget">Summarizer input budget</span>
               <input id="smp-input-budget" class="text_pole" type="number" min="8192" max="1000000" step="1024">
