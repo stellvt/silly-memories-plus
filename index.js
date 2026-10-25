@@ -2163,6 +2163,8 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
   pending.preparedHistory = preparedHistory;
   const validation = getSettings().messageValidation;
   const locate = textMode ? locateTextConversation : (prompt, source) => locateChatConversation(prompt, source, validation);
+  // Message verification is optional; chat/source snapshots still guard commits.
+  const validateMessages = validation !== 'none';
   const resolve = conversation => textMode ? conversation : resolveChatConversation(original, conversation, validation);
   let previous = resolve(withPromptRoles(pending.outgoing, preparedHistory));
   let matches = locate(original, previous);
@@ -2198,7 +2200,7 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
     let desired = resolve(withPromptRoles(pending.outgoing, preparedHistory));
     const requiredTokens = (await countCoreChat(desired)).reduce((sum, entry) => sum + entry.tokens, 0);
     if (runtime.pendingPromptMeasurement !== pending) return;
-    const missingRaw = missingHistory(desired, locate(original, desired));
+    const missingRaw = validateMessages ? missingHistory(desired, locate(original, desired)) : [];
     const unverified = textMode ? [] : unverifiedChatHistory(original, desired, validation);
     if (unverified.length) {
       inspection.missing = inspection.missing.map(item => ({ ...item, reason: unverified.find(source => source.index === item.index)?.reason || item.reason }));
@@ -2218,13 +2220,13 @@ async function prepareFinalPrompt(eventData, textMode = false, extraTokens = 0, 
       pending.memorySnapshot = memoryPromptSnapshot();
     }
     const present = locate(original, desired);
-    const complete = !missingHistory(desired, present).length && desired.every((message, index) => !isSynthetic(message) || present.has(index));
+    const complete = !validateMessages || !missingHistory(desired, present).length && desired.every((message, index) => !isSynthetic(message) || present.has(index));
     const same = desired.length === previous.length && desired.every((message, index) => message.mes === previous[index].mes && message.promptRole === previous[index].promptRole && message.index === previous[index].index);
     const result = same && complete ? original
       : textMode ? replaceTextMemory(original, previous, desired, formatTextMemory) : replaceChatMemory(original, previous, desired, validation);
     matches = locate(result, desired);
     inspection = inspectConversation(result, desired, getChatMemory().blocks, textMode, matches, validation);
-    if (missingHistory(desired, matches).length || desired.some((message, index) => isSynthetic(message) && !matches.has(index))) {
+    if (validateMessages && (missingHistory(desired, matches).length || desired.some((message, index) => isSynthetic(message) && !matches.has(index)))) {
       throw new LocalizedError(msg('Memory or recent history is missing from the prompt. Check the chat history marker and prompt settings.'));
     }
     const actual = await count(result) + extraTokens;

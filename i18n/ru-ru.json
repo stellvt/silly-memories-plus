@@ -12,6 +12,7 @@
   "smp.Message validation": "Проверка сообщений",
   "smp.Presence only": "Только наличие",
   "smp.Message content": "Содержимое сообщений",
+  "smp.Do not check": "Не проверять",
   "smp.Compaction trigger": "Порог сжатия",
   "smp.Raw tail": "Свежая история",
   "smp.Target block tokens": "Целевой размер блока",

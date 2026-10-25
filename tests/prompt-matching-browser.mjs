@@ -19,14 +19,22 @@ import { resolve } from 'node:path';
 // missing/reordered messages or corrupted memory pass; a merged history match
 // consumes preset/lore; copied history changes lose bounded association; passive
 // counts charge changed history to Other; strict mode loses its content checks.
+// No-validation failures: the selection is lost or untranslated; missing,
+// reordered or rewritten messages still block transport or force compaction;
+// diagnostics hide unmatched messages; disabling checks changes stored data
+// or disables context budgeting. Presence/content must retain their guards.
 const validation = process.env.SMP_MESSAGE_VALIDATION || 'content';
+// Persistence checks require an isolated Tavern data root.
+const persistSettings = process.env.SMP_PERSIST_TEST_SETTINGS === '1';
 const require = createRequire(import.meta.url);
 const { chromium } = require(resolve(process.env.CODEX_NODE_MODULES, 'playwright'));
 const directory = process.env.SMP_ARTIFACT_DIR;
 await mkdir(directory, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.SMP_BROWSER_EXECUTABLE, headless: true });
 const page = await browser.newPage({ viewport: { width: 1000, height: 900 } });
-await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save|\/api\/settings\/save/, route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+await page.route(/\/api\/(?:chats|groups)\/.+(?:save|edit)|\/api\/chats\/save|\/api\/settings\/save/, route =>
+  persistSettings && route.request().url().endsWith('/api/settings/save') ? route.continue()
+    : route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
 const results = [];
 let failure;
 try {
@@ -122,13 +130,14 @@ try {
     };
   }, validation);
   const scenarios = ['unchanged', 'line-runs', 'edge-space', 'comments', 'combined', 'copied', 'consecutive', 'duplicates', 'media-tools', 'squashed', 'transport-only', 'late-compaction', 'words-deleted', 'words-replaced', 'visible-html', 'role-changed', 'removed', 'reordered', 'ambiguous', 'unclosed-comment', 'memory-changed', 'facts-changed', 'native-impostor', 'code-comment', 'code-space', 'long-loss', 'long-loss-copied', 'squashed-memory-changed'];
-  if (validation === 'presence') scenarios.push('rewrite', 'rewrite-copied', 'squashed-rewrite', 'transport-rewrite');
+  if (validation !== 'content') scenarios.push('rewrite', 'rewrite-copied', 'squashed-rewrite', 'transport-rewrite');
   for (const scenario of scenarios.filter(scenario => !process.env.SMP_SCENARIOS || process.env.SMP_SCENARIOS.split(',').includes(scenario))) {
     const result = await page.evaluate(async scenario => {
       const budget = scenario === 'late-compaction' ? 12000 : 16000;
       await pm.reset(scenario, budget);
-      const blocked = ['role-changed', 'removed', 'reordered', 'ambiguous', 'native-impostor', 'squashed-memory-changed'].includes(scenario)
-        || pm.validation === 'content' && (['words-deleted', 'words-replaced', 'visible-html', 'unclosed-comment', 'code-comment', 'code-space'].includes(scenario) || scenario.startsWith('long-loss'));
+      const unchecked = pm.validation === 'none';
+      const blocked = !unchecked && (['role-changed', 'removed', 'reordered', 'ambiguous', 'native-impostor', 'squashed-memory-changed'].includes(scenario)
+        || pm.validation === 'content' && (['words-deleted', 'words-replaced', 'visible-html', 'unclosed-comment', 'code-comment', 'code-space'].includes(scenario) || scenario.startsWith('long-loss')));
       const modify = data => {
         const list = data.chat || data.messages;
         let at = list.findIndex(m => typeof m.content === 'string' && m.content.includes('PRIVATE-STORY:'));
@@ -196,17 +205,19 @@ try {
         dispatched: pm.requests.length === 1 && output === 'matched stream' && !pm.stops,
         blocked: pm.requests.length === 0 && pm.stops > 0 && own.some(e => e.type === 'prompt-blocked'),
         noUnsafeCompaction: !blocked || !scenario.startsWith('long-loss') || pm.calls.length === 0 && pm.memoryState() === pm.memoryOriginal,
-        impostor: scenario !== 'native-impostor' || own.some(e => e.type === 'prompt-blocked' && e.missing?.some(m => m.index === 0)),
+        impostor: unchecked || scenario !== 'native-impostor' || own.some(e => e.type === 'prompt-blocked' && e.missing?.some(m => m.index === 0)),
         storedUnchanged: unchangedSource,
         preset: body.includes('PRIVATE-PRESET') && body.includes('PRIVATE-LORE'),
         injection: scenario === 'unchanged' || body.includes('PRIVATE-INJECTION'),
-        memory: body.includes('PRIVATE-MEMORY:') || body.includes('MATCH-SUMMARY:'),
-        syntheticStrict: scenario !== 'memory-changed' && scenario !== 'facts-changed' || !body.includes('PRIVATE-MEMORY: The tower opened.') && (scenario !== 'facts-changed' || sent.messages.some(m => m.content.includes('PRIVATE-FACT: Keep the key.'))),
+        memory: scenario === 'native-impostor' || body.includes('PRIVATE-MEMORY:') || body.includes('MATCH-SUMMARY:'),
+        syntheticStrict: unchecked || scenario !== 'memory-changed' && scenario !== 'facts-changed' || !body.includes('PRIVATE-MEMORY: The tower opened.') && (scenario !== 'facts-changed' || sent.messages.some(m => m.content.includes('PRIVATE-FACT: Keep the key.'))),
         tail: body.includes('PRIVATE-LATEST:'),
         stream: sent?.stream === true && sent?.max_tokens === 512 && !sent?.json_schema,
         media: scenario !== 'media-tools' || body.includes('data:image/png;base64,AA==') && body.includes('PRIVATE-SIGNATURE') && body.includes('matching-tool') && body.includes('PRIVATE-TOOL-RESULT'),
         compacted: scenario !== 'late-compaction' || pm.calls.length > 0 && pm.calls.some(messages => messages.some(m => m.content.includes('brass-key-event'))) && !body.includes('brass-key-event'),
         covered: !body.includes('PRIVATE-COVERED:'),
+        noMissingCompaction: !unchecked || !['removed', 'reordered', 'ambiguous', 'role-changed'].includes(scenario) || pm.calls.length === 0 && pm.memoryState() === pm.memoryOriginal,
+        missingVisible: !unchecked || scenario !== 'removed' || own.some(e => e.type === 'prompt-ready' && e.missing?.some(m => m.index === 2)),
       };
       return { scenario, passed: checks.storedUnchanged && (blocked ? checks.blocked && checks.noUnsafeCompaction : Object.entries(checks).every(([key, value]) => key === 'blocked' || value)), checks, stops: pm.stops, requests: pm.requests.length, calls: pm.calls.length, error, events: own };
     }, scenario);
@@ -237,10 +248,39 @@ try {
   const damaged = await page.evaluate(chat => {
     const own = pm.diagnostics.exportDiagnostics(pm.c.extensionSettings.silly_memories_plus, null).events.filter(e => e.chat === chat);
     const measured = own.find(e => e.type === 'prompt-estimate');
-    return { passed: (pm.validation === 'presence' ? measured?.included === measured?.expected && Boolean(measured) : own.some(e => e.type === 'prompt-estimate-rejected' && e.messages?.some(m => m.index === 2)) && !measured) && pm.calls.length === 0 && pm.requests.length === 0 && pm.memoryState() === pm.memoryOriginal, events: own };
+    return { passed: (pm.validation !== 'content' ? measured?.included === measured?.expected && Boolean(measured) : own.some(e => e.type === 'prompt-estimate-rejected' && e.messages?.some(m => m.index === 2)) && !measured) && pm.calls.length === 0 && pm.requests.length === 0 && pm.memoryState() === pm.memoryOriginal, events: own };
   }, badChat);
   results.push({ scenario: 'passive-damaged-is-not-fixed-overhead', ...damaged });
   const exported = await page.evaluate(() => pm.diagnostics.exportDiagnostics(pm.c.extensionSettings.silly_memories_plus, null));
+  if (validation === 'none') {
+    const savedResponse = page.waitForResponse(response => response.url().endsWith('/api/settings/save') && response.request().method() === 'POST');
+    const selection = await page.evaluate(async () => {
+      const select = document.getElementById('smp-message-validation');
+      const language = document.getElementById('smp-language');
+      select.value = 'none'; select.dispatchEvent(new Event('change', { bubbles: true }));
+      const saved = pm.c.extensionSettings.silly_memories_plus.messageValidation === 'none'
+        && pm.core.normalizeSettings({ messageValidation: 'none' }).messageValidation === 'none'
+        && pm.core.normalizeSettings().messageValidation === 'presence';
+      language.value = 'ru'; language.dispatchEvent(new Event('change', { bubbles: true }));
+      const russian = select.selectedOptions[0]?.textContent;
+      const root = document.getElementById('smp-settings');
+      document.body.append(root);
+      root.style.cssText = 'display:block;position:fixed;inset:20px auto auto 20px;width:320px;max-height:90vh;overflow:auto;z-index:99999;background:#202225';
+      root.querySelector('.inline-drawer-content').style.display = 'block';
+      root.querySelector('[data-section="summarizer"]').open = true;
+      language.value = 'en'; language.dispatchEvent(new Event('change', { bubbles: true }));
+      return { passed: saved && russian === 'Не проверять' && select.selectedOptions[0]?.textContent === 'Do not check' && select.options.length === 3, saved, russian };
+    });
+    results.push({ scenario: 'none-selection-persists-and-translates', ...selection });
+    await page.locator('#smp-settings [data-section="summarizer"]').screenshot({ path: resolve(directory, 'no-validation.png') });
+    await savedResponse;
+    if (persistSettings) {
+      await page.reload();
+      await page.waitForFunction(() => typeof sillyMemoriesPlusGenerateInterceptor === 'function');
+      const restored = await page.evaluate(() => SillyTavern.getContext().extensionSettings.silly_memories_plus.messageValidation);
+      results.push({ scenario: 'none-selection-survives-reload', passed: restored === 'none', restored });
+    }
+  }
   await writeFile(resolve(directory, 'downloaded-logs.json'), JSON.stringify(exported, null, 2));
   results.push({ scenario: 'logs-private', passed: !JSON.stringify(exported).includes('PRIVATE-') });
   await page.screenshot({ path: resolve(directory, 'context.png') });

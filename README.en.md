@@ -96,9 +96,15 @@ The target sets the desired size; a complete summary can exceed it. The extensio
 
 If context is over budget, switch some blocks back to summary mode, shorten pinned facts, or increase the context window in SillyTavern.
 
-The preset, active lorebooks, and additional prompts are counted in the assembled request. If the first message contains macros, the remaining prompt is measured during generation. Before sending, the extension checks that memory and recent history are present. Brief notifications announce task starts, completion, and errors.
+The preset, active lorebooks, and additional prompts are counted in the assembled request. If the first message contains macros, the remaining prompt is measured during generation. Brief notifications announce task starts, completion, and errors.
 
-For Chat Completion, **Summarizer → Message validation** defaults to **Presence only**. Silly Memories tracks history messages and counts their actual request text. Other extensions may change that text. **Message content** also checks the text, allowing whitespace changes and removal of complete HTML comments outside code examples. Missing messages and ambiguous matches require verification in both modes. Memory blocks and pinned facts are checked in full.
+**Summarizer → Message validation** offers three modes:
+
+- **Presence only** is the default for Chat Completion. It tracks history messages and counts their actual request text, including changes made by other extensions.
+- **Message content** also checks the text, allowing whitespace changes and removal of complete HTML comments outside code examples.
+- **Do not check** sends the request without checking message presence or content. Compaction and context budgeting remain enabled. Logs report history missing from the request.
+
+The first two modes check memory blocks and pinned facts in full. All modes check for chat changes and source edits while saving memory.
 
 The interface supports English and Russian. It follows SillyTavern's language by default. For a manual override, use **Debug → Interface language**.
 

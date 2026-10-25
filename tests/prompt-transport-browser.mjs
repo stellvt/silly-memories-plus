@@ -7,6 +7,9 @@ import { resolve } from 'node:path';
 // response limits, duplicated injections, late tools/lore overflow, disabled
 // history markers, raw-exposed blocks, cancelled/changed sources, log leaks,
 // wrong summary reasoning effort in either request path, and chat effort leakage.
+// With message checks off, an absent history marker must not block transport;
+// context overflow and source/memory changes during preparation still must.
+const validation = process.env.SMP_MESSAGE_VALIDATION || 'presence';
 const require = createRequire(import.meta.url);
 const { chromium } = require(resolve(process.env.CODEX_NODE_MODULES, 'playwright'));
 const directory = process.env.SMP_ARTIFACT_DIR;
@@ -25,7 +28,7 @@ try {
     const { loader } = await import('/scripts/action-loader.js');
     return SillyTavern.getContext().characters.length > 0 && !loader.active().some(handle => handle.slug === 'app-init');
   });
-  results = await page.evaluate(async () => {
+  results = await page.evaluate(async validation => {
     const script = await import('/script.js');
     const openai = await import('/scripts/openai.js');
     const core = await import('/scripts/extensions/third-party/silly-memories-plus/lib/core.mjs');
@@ -75,7 +78,7 @@ try {
         openai.oai_settings.squash_system_messages = scenario === 'squashed-narrators';
         if (scenario === 'squashed-narrators') for (const message of c.chat) message.extra.type = 'narrator';
         c.chatMetadata.silly_memories_plus = { schemaVersion: 3, pinnedFacts: 'Mira holds the key.', blocks: [{ id: 'transport-memory', level: 1, structured: structured('Rowan trusts Mira.'), sourceFrom: 0, sourceTo: 0, sourceTokens: 8000, summaryTokens: 100, status: 'active', sourceFingerprints: [], children: [], useRaw: ['raw-exposed', 'squashed-narrators'].includes(scenario) }] };
-        c.extensionSettings.silly_memories_plus = core.normalizeSettings({ summaryProfileId: 'transport-test', blockTargetTokens: 256, minimumSourceTokens: 512 });
+        c.extensionSettings.silly_memories_plus = core.normalizeSettings({ messageValidation: validation, summaryProfileId: 'transport-test', blockTargetTokens: 256, minimumSourceTokens: 512 });
         if (scenario === 'fallback-sse') c.extensionSettings.silly_memories_plus.summaryProfileId = '';
         await script.eventSource.emit(script.event_types.CHAT_CHANGED);
         const outgoing = c.chat.map((message, index) => ({ ...message, index }));
@@ -110,9 +113,10 @@ try {
         } finally { script.eventSource.removeListener(script.event_types.CHAT_COMPLETION_SETTINGS_READY, addTools); }
         const sent = payloads[0];
         const body = JSON.stringify(sent?.messages || []);
-        const invalid = ['too-large-preset', 'disabled-history', 'source-edited', 'memory-edited', 'facts-edited'].includes(scenario);
+        const uncheckedHistory = validation === 'none' && scenario === 'disabled-history';
+        const invalid = ['too-large-preset', 'source-edited', 'memory-edited', 'facts-edited'].includes(scenario) || scenario === 'disabled-history' && !uncheckedHistory;
         results.push({ scenario, aborted, stopped, requests: payloads.length, output, checks: { stream: sent?.stream, maxTokens: sent?.max_tokens, mainEffort: openai.oai_settings.reasoning_effort, sentEffort: sent?.reasoning_effort, schema: Boolean(sent?.json_schema), facts: body.includes('Mira holds the key.'), tail: c.chat.slice(-2).every(message => body.includes(message.mes)) },
-          passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && sent.reasoning_effort !== 'low' && openai.oai_settings.reasoning_effort === 'medium' && !sent.json_schema && body.includes('Mira holds the key.') && c.chat.slice(-2).every(message => body.includes(message.mes)) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
+          passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && sent.reasoning_effort !== 'low' && openai.oai_settings.reasoning_effort === 'medium' && !sent.json_schema && (uncheckedHistory || body.includes('Mira holds the key.') && c.chat.slice(-2).every(message => body.includes(message.mes))) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
       }
     } finally { globalThis.fetch = nativeFetch; }
     for (const path of ['profile', 'main-api']) {
@@ -120,7 +124,7 @@ try {
       results.push({ scenario: `low-reasoning-${path}`, requests: requests.length, passed: requests.length > 0 && requests.every(request => request.effort === 'low') });
     }
     return results;
-  });
+  }, validation);
   for (const result of results) assert.ok(result.passed, JSON.stringify(result));
 } catch (error) { failure = String(error.stack || error); }
 finally {
