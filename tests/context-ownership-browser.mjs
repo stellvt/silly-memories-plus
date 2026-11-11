@@ -175,6 +175,7 @@ try {
     co.script.setExtensionPrompt('ownership-injection', '', 1, 1, false, 0);
     const latest = result.chat.at(-1);
     latest.signature = 'PRIVATE-SIGNATURE-' + 'abc123'.repeat(100);
+    latest.reasoning = 'PRIVATE-REASONING';
     latest.content = [{ type: 'text', text: latest.content }, { type: 'image_url', image_url: { url: 'https://PRIVATE-IMAGE.invalid/test.png', detail: 'low' } }];
     await co.script.eventSource.emit(co.script.event_types.CHAT_COMPLETION_PROMPT_READY, { chat: result.chat, dryRun: false });
     await co.script.sendGenerationRequest('normal', { prompt: result.chat });
@@ -211,7 +212,7 @@ try {
   const request = logs.events.find(event => event.type === 'chat-request');
   await check('actual-request-log-lists-history-memory-and-token-components', request?.requestId && request.inventory?.some(item => item.kind === 'memory' && item.blockIds?.includes('later')) && request.inventory?.some(item => item.kind === 'history' && item.index === 0) && request.components?.length > 0, request);
   await check('logs-separate-preparation-from-dispatch', blocked?.requestId && !logs.events.some(event => event.type === 'chat-request' && event.requestId === blocked.requestId));
-  await check('logs-identify-injection-and-transport-costs-without-content', logs.events.some(event => event.type === 'chat-request' && event.components?.some(item => item.source === 'unmatched-chat-history')) && logs.events.some(event => event.components?.some(item => item.fields?.some(field => field.field === 'signature' && field.chars > 0 && field.tokens > 0) && item.mediaParts?.some(part => part.type === 'image_url'))));
+  await check('logs-count-media-and-reasoning-but-not-signatures', logs.events.some(event => event.type === 'chat-request' && event.components?.some(item => item.source === 'unmatched-chat-history')) && logs.events.some(event => event.components?.some(item => item.fields?.some(field => field.field === 'reasoning' && field.chars > 0 && field.tokens > 0) && item.mediaParts?.some(part => part.type === 'image_url'))) && !logs.events.some(event => event.components?.some(item => item.fields?.some(field => field.field === 'signature'))));
   await check('logs-contain-no-chat-prompt-or-credential-text', !/PRIVATE-|ownership-test|expanded-scene|Actually edited|SAVED-SCENE/.test(logText));
   const labels = await page.evaluate(async () => {
     const manager = co.openai.promptManager;

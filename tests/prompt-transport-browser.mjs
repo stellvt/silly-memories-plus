@@ -9,6 +9,8 @@ import { resolve } from 'node:path';
 // wrong summary reasoning effort in either request path, and chat effort leakage.
 // With message checks off, an absent history marker must not block transport;
 // context overflow and source/memory changes during preparation still must.
+// Signature metadata must not trigger compaction, reach managed requests, or
+// change stored signatures or the payload when Memories is disabled.
 const validation = process.env.SMP_MESSAGE_VALIDATION || 'presence';
 const require = createRequire(import.meta.url);
 const { chromium } = require(resolve(process.env.CODEX_NODE_MODULES, 'playwright'));
@@ -51,13 +53,25 @@ try {
     const nativeFetch = globalThis.fetch;
     let payloads = [];
     let stopped = 0;
+    let scenario;
+    script.eventSource.makeFirst(script.event_types.CHAT_COMPLETION_PROMPT_READY, data => {
+      if (!data.dryRun && data.chat.length && (scenario === 'signatures'
+        || scenario === 'fallback-sse' && data.chat.some(m => m.content?.includes?.('memory compaction engine')))) {
+        data.chat.at(-1).signature = 'PRIVATE-SIGNATURE' + ' opaque-signature'.repeat(8000);
+      }
+    });
+    script.eventSource.on(script.event_types.CHAT_COMPLETION_SETTINGS_READY, payload => {
+      if (scenario === 'fallback-sse' && payload.messages?.some(m => m.content?.includes?.('memory compaction engine'))) {
+        payload.messages.at(-1).thought_signature = 'PRIVATE-SIGNATURE-LATE-SUMMARY';
+      }
+    });
     script.eventSource.on(script.event_types.GENERATION_STOPPED, () => stopped++);
     globalThis.fetch = async (url, options) => {
       if (!String(url).includes('/api/backends/chat-completions/generate')) return nativeFetch.call(globalThis, url, options);
       options.signal?.throwIfAborted();
       const payload = JSON.parse(options.body);
       if (payload.json_schema) {
-        summaryRequests.push({ path: 'main-api', effort: payload.reasoning_effort });
+        summaryRequests.push({ path: 'main-api', effort: payload.reasoning_effort, unsigned: !JSON.stringify(payload.messages).includes('PRIVATE-SIGNATURE') });
         if (payload.reasoning_effort !== 'low' || payload.include_reasoning !== false || payload.stream !== false) throw new Error('Invalid main-API summarizer reasoning settings');
         return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(structured('Mira recovered the key.')) } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -70,15 +84,18 @@ try {
       } }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
     };
     try {
-      for (const scenario of ['sse', 'fallback-sse', 'raw-exposed', 'squashed-narrators', 'late-prompt', 'tools', 'too-large-preset', 'disabled-history', 'source-edited', 'memory-edited', 'facts-edited']) {
+      for (scenario of ['sse', 'fallback-sse', 'signatures', 'disabled-signatures', 'raw-exposed', 'squashed-narrators', 'late-prompt', 'tools', 'too-large-preset', 'disabled-history', 'source-edited', 'memory-edited', 'facts-edited']) {
         payloads = []; stopped = 0;
+        const signed = scenario.endsWith('signatures');
+        const disabled = scenario === 'disabled-signatures';
         script.setExternalAbortController(new AbortController());
         c.characters.at(-1).chat = `transport-${scenario}`;
         c.chat.splice(0, c.chat.length, ...Array.from({ length: 4 }, (_, index) => ({ name: 'Mira', mes: `Source ${index}: ` + ' history'.repeat(index === 1 ? 1600 : 300), is_user: index % 2 === 0, is_system: false, extra: {} })));
         openai.oai_settings.squash_system_messages = scenario === 'squashed-narrators';
+        if (signed) c.chat.at(-1).extra.reasoning_signature = 'PRIVATE-STORED-SIGNATURE';
         if (scenario === 'squashed-narrators') for (const message of c.chat) message.extra.type = 'narrator';
         c.chatMetadata.silly_memories_plus = { schemaVersion: 3, pinnedFacts: 'Mira holds the key.', blocks: [{ id: 'transport-memory', level: 1, structured: structured('Rowan trusts Mira.'), sourceFrom: 0, sourceTo: 0, sourceTokens: 8000, summaryTokens: 100, status: 'active', sourceFingerprints: [], children: [], useRaw: ['raw-exposed', 'squashed-narrators'].includes(scenario) }] };
-        c.extensionSettings.silly_memories_plus = core.normalizeSettings({ messageValidation: validation, summaryProfileId: 'transport-test', blockTargetTokens: 256, minimumSourceTokens: 512 });
+        c.extensionSettings.silly_memories_plus = core.normalizeSettings({ enabled: !disabled, messageValidation: validation, summaryProfileId: 'transport-test', blockTargetTokens: 256, minimumSourceTokens: 512 });
         if (scenario === 'fallback-sse') c.extensionSettings.silly_memories_plus.summaryProfileId = '';
         await script.eventSource.emit(script.event_types.CHAT_CHANGED);
         const outgoing = c.chat.map((message, index) => ({ ...message, index }));
@@ -99,7 +116,14 @@ try {
         if (scenario === 'source-edited') c.chat[2].mes = 'Edited after preparation.';
         if (scenario === 'memory-edited') c.chatMetadata.silly_memories_plus.blocks[0].structured.narrative = 'Manually edited memory.';
         if (scenario === 'facts-edited') c.chatMetadata.silly_memories_plus.pinnedFacts = 'Changed pinned facts.';
-        const addTools = payload => { if (scenario === 'tools') payload.tools = [{ type: 'function', function: { name: 'lookup', description: ' schema'.repeat(800), parameters: { type: 'object', properties: {} } } }]; };
+        const addTools = payload => {
+          if (scenario === 'tools') payload.tools = [{ type: 'function', function: { name: 'lookup', description: ' schema'.repeat(800), parameters: { type: 'object', properties: {} } } }];
+          if (signed && payload.messages.length) {
+            const message = payload.messages.at(-1);
+            message.signature = 'PRIVATE-SIGNATURE-LATE';
+            message.reasoning_details = [{ type: 'reasoning.encrypted', data: 'PRIVATE-SIGNATURE-ENCRYPTED' }, { type: 'reasoning.text', text: 'Visible reasoning' }];
+          }
+        };
         script.eventSource.on(script.event_types.CHAT_COMPLETION_SETTINGS_READY, addTools);
         // Put the guard last, as it is in the application before dispatch.
         const listeners = script.eventSource.events[script.event_types.CHAT_COMPLETION_SETTINGS_READY];
@@ -115,13 +139,15 @@ try {
         const body = JSON.stringify(sent?.messages || []);
         const uncheckedHistory = validation === 'none' && scenario === 'disabled-history';
         const invalid = ['too-large-preset', 'source-edited', 'memory-edited', 'facts-edited'].includes(scenario) || scenario === 'disabled-history' && !uncheckedHistory;
+        const signaturesCorrect = !signed || (body.includes('PRIVATE-SIGNATURE') === disabled && body.includes('Visible reasoning') && c.chat.at(-1).extra.reasoning_signature === 'PRIVATE-STORED-SIGNATURE');
         results.push({ scenario, aborted, stopped, requests: payloads.length, output, checks: { stream: sent?.stream, maxTokens: sent?.max_tokens, mainEffort: openai.oai_settings.reasoning_effort, sentEffort: sent?.reasoning_effort, schema: Boolean(sent?.json_schema), facts: body.includes('Mira holds the key.'), tail: c.chat.slice(-2).every(message => body.includes(message.mes)) },
-          passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && sent.reasoning_effort !== 'low' && openai.oai_settings.reasoning_effort === 'medium' && !sent.json_schema && (uncheckedHistory || body.includes('Mira holds the key.') && c.chat.slice(-2).every(message => body.includes(message.mes))) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
+          passed: invalid ? stopped > 0 && payloads.length === 0 : !aborted && !stopped && output === 'one two three' && payloads.length === 1 && sent.stream === true && sent.max_tokens === 512 && sent.reasoning_effort !== 'low' && openai.oai_settings.reasoning_effort === 'medium' && !sent.json_schema && signaturesCorrect && (uncheckedHistory || (disabled || body.includes('Mira holds the key.')) && c.chat.slice(-2).every(message => body.includes(message.mes))) && (!['raw-exposed', 'squashed-narrators'].includes(scenario) || body.includes(c.chat[0].mes)), status: document.getElementById('smp-status').textContent });
       }
     } finally { globalThis.fetch = nativeFetch; }
     for (const path of ['profile', 'main-api']) {
       const requests = summaryRequests.filter(request => request.path === path);
       results.push({ scenario: `low-reasoning-${path}`, requests: requests.length, passed: requests.length > 0 && requests.every(request => request.effort === 'low') });
+      if (path === 'main-api') results.push({ scenario: 'fallback-summary-omits-signatures', passed: requests.length > 0 && requests.every(request => request.unsigned) });
     }
     return results;
   }, validation);

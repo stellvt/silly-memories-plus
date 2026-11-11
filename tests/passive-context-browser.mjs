@@ -46,8 +46,10 @@ try {
     c.chat.splice(0, c.chat.length, { name: 'Mira', mes: 'Mira found the brass key.', is_user: false, is_system: false, extra: {} }, { name: 'User', mes: 'What opens with that key?', is_user: true, is_system: false, extra: {} });
     for (const message of c.chat) Object.assign(message, { swipe_id: 0, swipes: [message.mes], swipe_info: [{ extra: {} }] });
     c.chatMetadata.silly_memories_plus = { schemaVersion: 3, blocks: [] };
-    c.extensionSettings.silly_memories_plus = core.normalizeSettings({ minimumSourceTokens: 512 });
-    globalThis.pc = { script, openai, core, c, dryRuns: 0, notices: 0, original: JSON.stringify(c.chat), snapshots: [] };
+    c.extensionSettings.silly_memories_plus = core.normalizeSettings({ minimumSourceTokens: 512, debug: true });
+    const diagnostics = await import('/scripts/extensions/third-party/silly-memories-plus/lib/diagnostics.mjs');
+    const estimate = () => diagnostics.exportDiagnostics(c.extensionSettings.silly_memories_plus, null).events.filter(e => e.type === 'prompt-estimate').at(-1);
+    globalThis.pc = { script, openai, core, c, estimate, dryRuns: 0, notices: 0, original: JSON.stringify(c.chat), snapshots: [] };
     script.eventSource.on(script.event_types.GENERATION_STARTED, (_, __, dryRun) => { if (dryRun) pc.dryRuns++; });
     script.eventSource.on(script.event_types.CHAT_COMPLETION_PROMPT_READY, data => { if (data.dryRun) pc.snapshots.push(structuredClone(data.chat)); });
     const root = document.getElementById('smp-settings');
@@ -63,6 +65,21 @@ try {
   const first = await other();
   await check('idle-chat-load-measures-current-prompt', first > 150 && await page.evaluate(() => pc.dryRuns > 0));
   await check('dry-run-does-not-mutate-chat', await page.evaluate(() => JSON.stringify(pc.c.chat) === pc.original && pc.c.chatMetadata.silly_memories_plus.blocks.length === 0));
+  const baseline = await page.evaluate(async () => {
+    const baseline = pc.estimate();
+    pc.sign = data => {
+      if (data.dryRun && data.chat.length) data.chat.at(-1).signature = ' opaque-signature'.repeat(8000);
+    };
+    pc.script.eventSource.on(pc.script.event_types.CHAT_COMPLETION_PROMPT_READY, pc.sign);
+    await pc.script.eventSource.emit(pc.script.event_types.SETTINGS_UPDATED);
+    return { requestId: baseline.requestId, total: baseline.total, fixed: baseline.fixed };
+  });
+  await page.waitForFunction(id => pc.estimate()?.requestId > id, baseline.requestId);
+  await check('passive-total-and-fixed-exclude-signature', await page.evaluate(baseline => {
+    pc.script.eventSource.removeListener(pc.script.event_types.CHAT_COMPLETION_PROMPT_READY, pc.sign);
+    const measured = pc.estimate();
+    return measured.total === baseline.total && measured.fixed === baseline.fixed && !measured.components.some(m => m.fields.some(f => f.field === 'signature'));
+  }, baseline));
   await page.evaluate(async () => {
     pc.c.characters.at(-1).description += ' additional-character-context'.repeat(250);
     pc.c.characters.at(-1).data.description = pc.c.characters.at(-1).description;

@@ -67,7 +67,7 @@ import {
   renderRegenerationComparison,
 } from './lib/ui.mjs';
 import { getContextUsage, renderPinnedFacts } from './lib/context.mjs';
-import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory, resolveChatConversation, unverifiedChatHistory } from './lib/prompt.mjs';
+import { countChatPrompt, isSynthetic, locateChatConversation, locateTextConversation, missingHistory, replaceChatMemory, replaceTextMemory, resolveChatConversation, unverifiedChatHistory, withoutChatSignatures } from './lib/prompt.mjs';
 import { installNativeContextManagement } from './lib/native-context.mjs';
 import { blockSourceMatches, buildSourceHash, findCurrentMessage, fingerprintMessage, getMessageIdentity, hasSourceIdentity, inspectBlockSource, reconcileMemorySources } from './lib/source-identity.mjs';
 import { diagnosticError, recordDiagnostic, exportDiagnostics, nextDiagnosticRequest } from './lib/diagnostics.mjs';
@@ -520,6 +520,7 @@ async function requestSummary(prompt, targetTokens, level, stage, instruction = 
     payload.json_schema = SUMMARY_JSON_SCHEMA;
   };
   eventSource.once(event_types.CHAT_COMPLETION_SETTINGS_READY, overrideFallbackPayload);
+  eventSource.makeLast(event_types.CHAT_COMPLETION_SETTINGS_READY, prepareChatSettings);
   try {
     const response = await generateRawData({
       prompt,
@@ -2279,11 +2280,16 @@ function captureTextFormatting(data) {
 }
 
 async function prepareChatSettings(payload) {
-  const pending = runtime.pendingPromptMeasurement;
-  if (!getSettings().enabled || !pending?.prepared || runtime.summarizing || !Array.isArray(payload.messages)) return;
-  const extra = payload.tools?.length ? await countTextTokens(JSON.stringify(payload.tools)) : 0;
-  await prepareFinalPrompt({ chat: payload.messages }, false, extra, true);
-  if (runtime.pendingPromptMeasurement !== pending) return;
+  const pending = runtime.summarizing ? null : runtime.pendingPromptMeasurement;
+  if (!getSettings().enabled || !(pending || runtime.fallbackSummaryActive) || !Array.isArray(payload.messages)) return;
+  let extra = 0;
+  if (pending?.prepared) {
+    extra = payload.tools?.length ? await countTextTokens(JSON.stringify(payload.tools)) : 0;
+    await prepareFinalPrompt({ chat: payload.messages }, false, extra, true);
+    if (runtime.pendingPromptMeasurement !== pending) return;
+  }
+  payload.messages = payload.messages.map(withoutChatSignatures);
+  if (!pending?.prepared) return;
   pending.dispatched = true;
   recordDiagnostic('chat-request', { requestId: pending.requestId, phase: 'dispatch', delivery: 'handed-to-tavern',
     stream: payload.stream === true, messages: payload.messages.length, maxTokens: payload.max_tokens, tools: payload.tools?.length || 0, toolTokens: extra,

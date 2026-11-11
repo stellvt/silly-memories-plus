@@ -179,9 +179,9 @@ try {
         if (scenario === 'copied') list.splice(0, list.length, ...structuredClone(list));
         if (scenario === 'media-tools') {
           const m = list.find(m => m.content?.includes?.('PRIVATE-STORY:'));
-          m.content = [{ type: 'text', text: m.content }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==', detail: 'low' } }];
+          m.content = [{ type: 'text', text: m.content, thoughtSignature: 'PRIVATE-SIGNATURE-PART' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==', detail: 'low' } }];
           m.signature = 'PRIVATE-SIGNATURE';
-          m.tool_calls = [{ id: 'matching-tool', type: 'function', function: { name: 'inspect', arguments: '{}' } }];
+          m.tool_calls = [{ id: 'matching-tool', type: 'function', signature: 'PRIVATE-SIGNATURE-TOOL', function: { name: 'inspect', arguments: '{"signature":"argument-value"}' } }];
           list.splice(list.indexOf(m) + 1, 0, { role: 'tool', tool_call_id: 'matching-tool', content: 'PRIVATE-TOOL-RESULT' });
         }
         if (scenario === 'late-compaction') list.unshift({ role: 'system', content: 'PRIVATE-LATE-LORE ' + ' lore-token'.repeat(3200) });
@@ -213,7 +213,7 @@ try {
         syntheticStrict: unchecked || scenario !== 'memory-changed' && scenario !== 'facts-changed' || !body.includes('PRIVATE-MEMORY: The tower opened.') && (scenario !== 'facts-changed' || sent.messages.some(m => m.content.includes('PRIVATE-FACT: Keep the key.'))),
         tail: body.includes('PRIVATE-LATEST:'),
         stream: sent?.stream === true && sent?.max_tokens === 512 && !sent?.json_schema,
-        media: scenario !== 'media-tools' || body.includes('data:image/png;base64,AA==') && body.includes('PRIVATE-SIGNATURE') && body.includes('matching-tool') && body.includes('PRIVATE-TOOL-RESULT'),
+        media: scenario !== 'media-tools' || body.includes('data:image/png;base64,AA==') && !body.includes('PRIVATE-SIGNATURE') && body.includes('matching-tool') && body.includes('PRIVATE-TOOL-RESULT') && body.includes('argument-value'),
         compacted: scenario !== 'late-compaction' || pm.calls.length > 0 && pm.calls.some(messages => messages.some(m => m.content.includes('brass-key-event'))) && !body.includes('brass-key-event'),
         covered: !body.includes('PRIVATE-COVERED:'),
         noMissingCompaction: !unchecked || !['removed', 'reordered', 'ambiguous', 'role-changed'].includes(scenario) || pm.calls.length === 0 && pm.memoryState() === pm.memoryOriginal,
