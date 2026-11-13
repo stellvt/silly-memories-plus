@@ -21,9 +21,24 @@ Opening a chat checks each memory block's source. An archived block can be resto
 5. Click **Test summarizer** to check the connection with a short sample.
 6. Open a chat. Automatic compaction is enabled by default; you can start with the default settings.
 
-To run it manually, click **Summarize history** under **Runtime and maintenance**. Task progress appears above the submenus, next to **Stop task**.
+Click **Summarize history** under **Runtime and maintenance** to create L1 blocks from older messages and keep the recent tail. To combine existing blocks, select them in **Current chat memory** and click **Merge blocks**. Task progress appears above the submenus, next to **Stop task**.
 
-Manual compaction divides older history into parts and saves each as a separate L1 block. Instructions and the response reserve are subtracted from the input budget; the source uses 90% of the remaining space. Parts end at message boundaries. A single message exceeding the budget is summarized in pieces within one block. Each completed block is saved immediately. Recent history stays in full.
+**Summarize range** uses the message numbers shown in SillyTavern, includes both endpoints, and can include recent messages. If the range overlaps active blocks, review the affected blocks before confirming. Each affected block moves to the archive once its replacement is saved. Messages outside the new coverage are sent in full.
+
+Mark an **arc end** on a message to have L1 compaction end a block on that message and start the next block after it. Removing an arc end leaves completed blocks intact.
+
+Manual compaction divides long ranges at message boundaries to fit the summarizer's input budget. A single message exceeding that budget is summarized in pieces within one block. Each completed block is saved immediately.
+
+### Slash commands
+
+| Command | Action |
+| --- | --- |
+| `/smp-compact` | Summarize older messages into L1 blocks. |
+| `/smp-compact from=10 to=42` | Summarize messages 10 through 42. |
+| `/smp-merge` | Merge the selected blocks into the next level. |
+| `/smp-checkpoint at=42` | Mark an arc end; omit `at` to mark the latest message. |
+| `/smp-uncheckpoint at=42` | Remove an arc end. |
+| `/smp-checkpoints` | List arc ends for the current chat. |
 
 ## How memory works
 
@@ -37,7 +52,7 @@ A block's level tells you what it summarizes:
 - **L2** combines several L1 blocks.
 - **L3 and higher** further summarize combined blocks.
 
-When memory takes up too much space, the extension merges eligible blocks. It can also merge them before reaching the threshold if the next request needs more room. The latest two messages are always kept in full.
+When memory takes up too much space, the extension automatically merges eligible blocks. It can also merge them before reaching the threshold if the next request needs more room. Automatic compaction keeps the latest two messages in full.
 
 The context meter above the submenus breaks usage down into memory, original history, pinned facts, and the rest of the prompt. It shows the compaction threshold and remaining space. The prompt is measured in the background when you open a chat or change messages or settings. Click **Refresh** to measure it manually.
 

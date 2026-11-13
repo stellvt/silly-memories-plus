@@ -22,6 +22,10 @@ import { formatInstructModeChat } from '../../../instruct-mode.js';
 import { is_group_generating } from '../../../group-chats.js';
 import { appendFileContent } from '../../../chats.js';
 import { isExecutingCommandsFromChatInput } from '../../../slash-commands.js';
+import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
+import { ARGUMENT_TYPE, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
+import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
+import { Popup, POPUP_RESULT } from '../../../popup.js';
 import { getRegexedString, regex_placement } from '../../regex/engine.js';
 import { system_message_types } from '../../../system-messages.js';
 import { ChatCompletion, promptManager, setOpenAIMessages, oai_settings, getChatCompletionModel } from '../../../openai.js';
@@ -44,6 +48,7 @@ import {
   parseStructuredSummary,
   renderBlockText,
   rewriteConversationWithMemory,
+  selectTail,
   setBlockUseRaw,
   stageBlockRegeneration,
   stageCompactionTransaction,
@@ -51,6 +56,7 @@ import {
   SUMMARY_JSON_SCHEMA,
   sumTokens,
 } from './lib/core.mjs';
+import { changeCheckpoint, listCheckpoints, prepareManualRange, stageManualCompaction } from './lib/manual-memory.mjs';
 import {
   assertSummaryRequestFits,
   chunkStructuredSources,
@@ -243,7 +249,7 @@ function updateJobControls() {
   const enabled = getSettings().enabled;
   const cancel = document.getElementById('smp-cancel');
   if (cancel) cancel.disabled = !runtime.summarizing || runtime.cancelRequested;
-  for (const id of ['smp-generate-preview', 'smp-save-preview', 'smp-close-regeneration', 'smp-discard-preview', 'smp-compact-now', 'smp-test-summarizer', 'smp-clear']) {
+  for (const id of ['smp-generate-preview', 'smp-save-preview', 'smp-close-regeneration', 'smp-discard-preview', 'smp-compact-now', 'smp-compact-range', 'smp-add-checkpoint', 'smp-remove-checkpoint', 'smp-test-summarizer', 'smp-clear']) {
     const button = document.getElementById(id);
     if (button) button.disabled = !enabled || busy || (id === 'smp-save-preview' && !runtime.regenerationPreview);
   }
@@ -347,9 +353,13 @@ async function savePinnedFacts() {
 function getCurrentComparableChat() {
   const context = getContext();
   const chat = Array.isArray(context?.chat) ? context.chat : [];
-  return chat
-    .filter(message => !message?.is_system || Array.isArray(message?.extra?.tool_invocations))
-    .map((message, index) => ({ ...message, index }));
+  const comparable = [];
+  for (const [chatIndex, message] of chat.entries()) {
+    if (!message?.is_system || Array.isArray(message?.extra?.tool_invocations)) {
+      comparable.push({ ...message, chatIndex, index: comparable.length });
+    }
+  }
+  return comparable;
 }
 
 function excludedSourceMessages() {
@@ -372,7 +382,7 @@ function fingerprintsStillMatch(fingerprints) {
 }
 
 function memoryPromptSnapshot(memory = getChatMemory()) {
-  return JSON.stringify({ pinnedFacts: memory.pinnedFacts, blocks: memory.blocks.map(({ summaryTokens, rawTokens, ...block }) => block) });
+  return JSON.stringify({ pinnedFacts: memory.pinnedFacts, checkpoints: memory.checkpoints, blocks: memory.blocks.map(({ summaryTokens, rawTokens, ...block }) => block) });
 }
 
 function assertMemoryEditCurrent(chatId, snapshot) {
@@ -837,7 +847,7 @@ async function regenerateMemoryBlock(blockId, instruction = '') {
 }
 
 async function createManualRollup() {
-  if (runtime.summarizing) return;
+  assertManualOperationAvailable();
   const chatId = getCurrentChatId();
   if (chatId == null) throw new LocalizedError(msg('No active chat'));
   const memory = getChatMemory();
@@ -872,12 +882,130 @@ async function createManualRollup() {
       'success',
       msg`Created L${result.targetLevel} from ${result.childIds.length} selected L${result.sourceLevel} blocks: ${result.rollupBlock.sourceTokens} → ${result.rollupBlock.summaryTokens} tokens.`,
     );
+    return result.rollupBlock.id;
   } catch (error) {
     const message = error;
     setStatus(runtime.cancelRequested ? 'warning' : 'error', message);
     throw error;
   } finally {
     endMemoryJob();
+  }
+}
+
+function assertManualOperationAvailable() {
+  assertEnabled();
+  if (runtime.summarizing || runtime.queued || runtime.liveGeneration || runtime.preparingPrompt || is_group_generating) {
+    throw new LocalizedError(msg('Wait for the current generation or memory task to finish.'));
+  }
+}
+
+function showCheckpoints(memory = getChatMemory()) {
+  const indices = listCheckpoints(memory, getCurrentComparableChat()).map(message => message.chatIndex);
+  return indices.length ? t`Arc ends: ${indices.join(', ')}` : translate('No arc ends marked.');
+}
+
+async function editCheckpoint(at, marked) {
+  assertManualOperationAvailable();
+  const chatId = getCurrentChatId();
+  if (chatId == null) throw new LocalizedError(msg('No active chat'));
+  const memory = changeCheckpoint(getChatMemory(), getCurrentComparableChat(), at, marked);
+  await setChatMemory(memory, true, chatId);
+  return showCheckpoints(memory);
+}
+
+async function summarizeMessages(from, to) {
+  assertManualOperationAvailable();
+  const chatId = getCurrentChatId();
+  if (chatId == null) throw new LocalizedError(msg('No active chat'));
+  const chat = getCurrentComparableChat();
+  const fingerprints = chat.map(fingerprintMessage);
+  const excluded = JSON.stringify(excludedSourceMessages());
+  const memory = getChatMemory();
+  let snapshot = memoryPromptSnapshot(memory);
+  const exactRange = from !== undefined || to !== undefined;
+  const range = exactRange ? prepareManualRange(memory, chat, from, to) : null;
+  if (range?.overlaps.length) {
+    const ranges = range.overlaps.map(block => `L${block.level} #${chat[block.sourceFrom]?.chatIndex ?? block.sourceFrom}–#${chat[block.sourceTo]?.chatIndex ?? block.sourceTo}`).join(', ');
+    const answer = await Popup.show.confirm(translate('Replace overlapping memory?'),
+      t`Affected blocks: ${ranges}. When a replacement is saved, the affected block moves to the archive. Messages outside the new blocks use original history.`);
+    if (answer !== POPUP_RESULT.AFFIRMATIVE) return '';
+  }
+  const assertCurrent = () => {
+    assertEnabled();
+    runtime.abortController?.signal.throwIfAborted();
+    assertMemoryEditCurrent(chatId, snapshot);
+    const current = getCurrentComparableChat();
+    if (current.length !== chat.length || current.some((message, index) => message.chatIndex !== chat[index].chatIndex)
+      || !fingerprintsStillMatch(fingerprints) || JSON.stringify(excludedSourceMessages()) !== excluded) {
+      throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
+    }
+  };
+  assertManualOperationAvailable();
+  assertCurrent();
+  beginMemoryJob(chatId);
+  setStatus('working', msg('Starting forced compaction.'));
+  try {
+    const selected = new Set((range?.source ?? getUncoveredMessages(chat, getActiveFrontier(memory).blocks)).map(message => message.index));
+    const cache = runtime.preparedHistoryByChat.get(String(chatId));
+    const formatted = await prepareStoredHistory(chat, selected);
+    assertCurrent();
+    const counted = await countCoreChat(formatted.map(message => {
+      const cached = cache?.get(message.index);
+      const mes = cached?.hash === fingerprints[message.index]?.hash ? cached.promptText : substituteParams(message.mes);
+      return { ...message, mes, promptText: mes };
+    }));
+    const settings = getSettings();
+    const budget = getMaxPromptTokens();
+    const fixed = (runtime.fixedPromptTokensByChat.get(String(chatId)) || 0) + await countTextTokens(renderPinnedFacts(memory.pinnedFacts));
+    const tail = Math.min(Math.max(1, budget - fixed), Math.floor(budget * (1 - settings.triggerRatio)));
+    const rawEntries = exactRange ? counted : selectTail(counted, tail, 2).source;
+    assertCurrent();
+    if (!rawEntries.length) {
+      setStatus('idle', msg('Nothing to compact.'));
+      return '';
+    }
+    const result = await stageManualCompaction({
+      memory, rawEntries, replaceOverlaps: Boolean(range?.overlaps.length), requireReduction: !exactRange,
+      checkpointIndices: listCheckpoints(memory, chat).map(message => message.index),
+      targetTokens: settings.blockTargetTokens,
+      partitionRawSource: (entries, targetTokens) => partitionManualSource(entries, targetTokens, settings),
+      createBlock,
+      validateBlock: (block, label) => { assertCurrent(); assertBlockSourceStillCurrent(block, chatId, label); },
+      onStage: (part, total, tokens, target) => {
+        assertCurrent();
+        setStatus('working', msg`Summarizing part ${part}/${total}: ${tokens} → ~${target} tokens.`);
+      },
+      onCheckpoint: async candidate => {
+        assertCurrent();
+        await setChatMemory(candidate, true, chatId);
+        snapshot = memoryPromptSnapshot(candidate);
+      },
+    });
+    setStatus('success', msg`Created ${result.rawBlocks.length} L1 blocks.`);
+    return result.rawBlocks.map(block => block.id).join(', ');
+  } catch (error) {
+    if (getCurrentChatId() === chatId) setStatus(runtime.cancelRequested ? 'warning' : 'error', error);
+    throw error;
+  } finally {
+    endMemoryJob();
+  }
+}
+
+function registerMemoryCommands() {
+  const number = name => SlashCommandNamedArgument.fromProps({
+    name, description: 'Message number as shown in the chat', typeList: [ARGUMENT_TYPE.NUMBER],
+  });
+  const commands = [
+    ['smp-compact', args => summarizeMessages(args.from, args.to), 'Summarize history; use from and to for an inclusive range.', ['from', 'to']],
+    ['smp-merge', () => createManualRollup(), 'Merge the selected memory blocks.', []],
+    ['smp-checkpoint', args => editCheckpoint(args.at, true), 'Mark an arc end at a message, or at the latest message.', ['at']],
+    ['smp-uncheckpoint', args => editCheckpoint(args.at, false), 'Remove an arc end from a message.', ['at']],
+    ['smp-checkpoints', () => showCheckpoints(), 'List arc ends in this chat.', []],
+  ];
+  for (const [name, callback, helpString, args] of commands) {
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+      name, callback: async named => (await callback(named)) ?? '', namedArgumentList: args.map(number), helpString, returns: ARGUMENT_TYPE.STRING,
+    }));
   }
 }
 
@@ -1190,7 +1318,20 @@ function assertPinnedFactsCurrent(memory, chatId) {
   }
 }
 
-async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, force) {
+async function partitionManualSource(entries, targetTokens, settings) {
+  const countTokens = text => {
+    runtime.abortController.signal.throwIfAborted();
+    return countTextTokens(text);
+  };
+  const { sourceBudget } = await getSummarySourceBudget({ settings, stage: 'raw', targetTokens, level: 1, countTokens });
+  const batchBudget = Math.floor(sourceBudget * 0.9);
+  const groups = await partitionRawEntries(entries, batchBudget, countTokens);
+  recordDiagnostic('raw-batches', { requestId: runtime.diagnosticRequestId, inputBudget: settings.summaryInputBudgetTokens, sourceBudget, batchBudget,
+    blocks: groups.map(source => ({ from: source[0].index, to: source.at(-1).index, sourceTokens: sumTokens(source) })) });
+  return groups;
+}
+
+async function executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, checkpointIndices) {
   runtime.abortController = new AbortController();
   runtime.activeCompactionChatId = chatId;
   let committedSnapshot = memoryPromptSnapshot(memory);
@@ -1201,19 +1342,7 @@ async function executePlanTransaction(plan, memory, chatId, contextSize, setting
       contextBudget: contextSize,
       fixedPromptTokens: fixedPromptTokens + pinnedTokens,
       settings,
-      force,
-      partitionRawSource: force ? async (entries, targetTokens) => {
-        const countTokens = text => {
-          runtime.abortController.signal.throwIfAborted();
-          return countTextTokens(text);
-        };
-        const { sourceBudget } = await getSummarySourceBudget({ settings, stage: 'raw', targetTokens, level: 1, countTokens });
-        const batchBudget = Math.floor(sourceBudget * 0.9);
-        const groups = await partitionRawEntries(entries, batchBudget, countTokens);
-        recordDiagnostic('raw-batches', { requestId: runtime.diagnosticRequestId, inputBudget: settings.summaryInputBudgetTokens, sourceBudget, batchBudget,
-          blocks: groups.map(source => ({ from: source[0].index, to: source.at(-1).index, sourceTokens: sumTokens(source) })) });
-        return groups;
-      } : undefined,
+      checkpointIndices,
       createBlock,
       validateBlock: (block, label) => {
         if (runtime.cancelRequested) throw new LocalizedError(msg('Compaction cancelled'));
@@ -1284,20 +1413,6 @@ async function runInterceptor(coreChat, contextSize, abort, type, measuredFixedT
   updateJobControls();
   const chatId = getCurrentChatId();
   try {
-    if (type === 'manual') {
-      const snapshot = memoryPromptSnapshot();
-      const fingerprints = getCurrentComparableChat().map(fingerprintMessage);
-      const cache = runtime.preparedHistoryByChat.get(String(chatId));
-      const formatted = await prepareStoredHistory(coreChat);
-      assertMemoryEditCurrent(chatId, snapshot);
-      if (!fingerprintsStillMatch(fingerprints)) throw new LocalizedError(msg('Source messages changed during compaction. Start generation again.'));
-      coreChat.splice(0, coreChat.length, ...formatted.map(message => {
-        const cached = cache?.get(message.index);
-        const text = cached?.hash === fingerprints.find(item => item.index === message.index)?.hash
-          ? cached.promptText : substituteParams(message.mes);
-        return { ...message, mes: text, promptText: text };
-      }));
-    }
     return await prepareMemoryContext(coreChat, contextSize, abort, type, measuredFixedTokens);
   } catch (error) {
     if (getCurrentChatId() === chatId) setStatus('error', error);
@@ -1325,11 +1440,12 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
     messages: traceIndexedText(getCurrentComparableChat(), originalSource),
   });
   // A prior request is a display estimate, never authority to block a new one.
-  const fixedPromptTokens = measuredFixedTokens ?? (type === 'manual' ? runtime.fixedPromptTokensByChat.get(String(preparedChatId)) || 0 : 0);
+  const fixedPromptTokens = measuredFixedTokens ?? 0;
 
   let memory;
   let plan;
   let pinnedTokens = 0;
+  let checkpointIndices;
   try {
     memory = await reconcileChatMemory(getChatMemory());
     if (!activeMemoryIsValid(getCurrentComparableChat(), memory)) {
@@ -1342,6 +1458,7 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
     pinnedTokens = facts ? await countTextTokens(facts) : 0;
 
     const activeFrontier = getActiveFrontier(memory);
+    checkpointIndices = listCheckpoints(memory, getCurrentComparableChat()).map(message => message.index);
     const rawMessages = getUncoveredMessages(coreChat, activeFrontier.blocks);
     const rawEntries = await countCoreChat(rawMessages);
     plan = buildCompactionPlan({
@@ -1349,6 +1466,7 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
       fixedPromptTokens: fixedPromptTokens + pinnedTokens,
       blocks: activeFrontier.blocks,
       rawEntries,
+      checkpointIndices,
       settings,
       force: runtime.forceCompaction,
     });
@@ -1374,16 +1492,6 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
     return;
   }
 
-  if (plan.kind === 'none' && type === 'manual') {
-    const messages = {
-      'below-trigger': 'Nothing to compact at the current trigger.',
-      'no-cold-source': 'Nothing to compact while preserving the configured raw tail.',
-      'source-too-small': msg`Cold source is smaller than the ${plan.effectiveMinimumSourceTokens}-token minimum.`,
-      'no-space-for-summary': 'The current conversation fits; there is no space for an additional memory block.',
-    };
-    setStatus('idle', messages[plan.reason] || msg('Nothing to compact.'));
-  }
-
   if (plan.kind !== 'none') {
     runtime.summarizing = true;
     runtime.cancelRequested = false;
@@ -1391,7 +1499,7 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
     updateManualRollupControls();
     const chatId = getCurrentChatId();
     try {
-      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, type === 'manual');
+      memory = await executePlanTransaction(plan, memory, chatId, contextSize, settings, pinnedTokens, preparedFingerprints, fixedPromptTokens, checkpointIndices);
     } catch (error) {
       const errorText = error;
       if (runtime.cancelRequested) {
@@ -1440,7 +1548,7 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
     const fixedTokens = fixedPromptTokens + pinnedTokens;
     const currentPlan = buildCompactionPlan({
       contextBudget: contextSize, fixedPromptTokens: fixedTokens,
-      blocks: frontier.blocks, rawEntries: finalRaw, settings,
+      blocks: frontier.blocks, rawEntries: finalRaw, checkpointIndices, settings,
     });
     updateContextFromPlan(currentPlan, contextSize, pinnedTokens);
     updateStats(memory);
@@ -1460,7 +1568,7 @@ async function prepareMemoryContext(coreChat, contextSize, abort, type, measured
     abort?.(true);
     return;
   }
-  if (type !== 'manual' && type !== 'prepared') {
+  if (type !== 'prepared') {
     runtime.pendingPromptMeasurement = {
       chatId: String(getCurrentChatId()), budget: contextSize,
       requestId, excluded,
@@ -1609,8 +1717,8 @@ async function measurePassivePrompt(data, dryRun) {
   scheduleContextRefresh();
 }
 
-async function prepareStoredHistory(source) {
-  return Promise.all(source.filter(message => !message.extra?.[Symbol.for('ignore')]).map(async message => {
+async function prepareStoredHistory(source, selected = null) {
+  return Promise.all(source.filter(message => !message.extra?.[Symbol.for('ignore')] && (!selected || selected.has(message.index))).map(async message => {
     const placement = message.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
     const text = getRegexedString(message.mes, placement, { isPrompt: true, depth: source.length - message.index - 1 });
     const mes = await appendFileContent(message, text);
@@ -1678,6 +1786,8 @@ function renderLibrary() {
   const drafts = sameChat ? [...container.querySelectorAll('.smp-inline-editor:not([hidden]) [data-field]')].map(input => ({ field: input.dataset.field, value: input.value })) : [];
   runtime.libraryChatId = getCurrentChatId();
   const memory = getChatMemory();
+  const checkpointList = document.getElementById('smp-checkpoint-list');
+  if (checkpointList) checkpointList.textContent = showCheckpoints(memory);
   syncPinnedFactsEditor();
   const blocks = memory.blocks.filter(block => runtime.libraryTab === 'active' ? block.status === 'active' : block.status !== 'active')
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -1900,18 +2010,19 @@ async function renderSettings() {
       });
     }
 
-    document.getElementById('smp-compact-now')?.addEventListener('click', async () => {
-      if (runtime.summarizing || runtime.queued) return;
-      const comparableChat = getCurrentComparableChat();
-      if (!comparableChat.length) { setStatus('idle', msg('Nothing to compact.')); return; }
-      runtime.forceCompaction = true;
-      setStatus('working', msg('Starting forced compaction.'));
-      try {
-        await runInterceptor(comparableChat, getMaxPromptTokens(), () => {}, 'manual');
-      } catch (error) {
+    const bindMemoryAction = (id, action) => document.getElementById(id)?.addEventListener('click', async () => {
+      const chatId = getCurrentChatId();
+      try { await action(); }
+      catch (error) {
+        if (getCurrentChatId() === chatId && runtime.lastStatus.text !== error) setStatus('error', error);
         console.error(LOG_PREFIX, error);
       }
     });
+    const input = id => document.getElementById(id).value;
+    bindMemoryAction('smp-compact-now', () => summarizeMessages());
+    bindMemoryAction('smp-compact-range', () => summarizeMessages(input('smp-range-from'), input('smp-range-to')));
+    bindMemoryAction('smp-add-checkpoint', () => editCheckpoint(input('smp-checkpoint-at') || undefined, true));
+    bindMemoryAction('smp-remove-checkpoint', () => editCheckpoint(input('smp-checkpoint-at'), false));
     document.getElementById('smp-test-summarizer')?.addEventListener('click', () => {
       void testSummarizerConnection().catch(error => console.error(LOG_PREFIX, error));
     });
@@ -1922,7 +2033,7 @@ async function renderSettings() {
       setStatus('warning', msg('Compaction cancellation requested.'));
     });
     document.getElementById('smp-clear')?.addEventListener('click', async () => {
-      if (!confirm(t('Clear summaries and pinned facts for this chat?'))) return;
+      if (!confirm(t('Clear summaries, pinned facts and arc ends for this chat?'))) return;
       runtime.selectedBlockId = null;
       runtime.manualRollupIds.clear();
       closeBlockEditor();
@@ -1982,9 +2093,7 @@ async function renderSettings() {
       const block = summary?.closest('.smp-block');
       if (block instanceof HTMLElement) selectMemoryBlock(block.dataset.blockId);
     });
-    document.getElementById('smp-rollup-selected')?.addEventListener('click', () => {
-      void createManualRollup().catch(error => console.error(LOG_PREFIX, error));
-    });
+    bindMemoryAction('smp-rollup-selected', createManualRollup);
     document.getElementById('smp-regenerate-block')?.addEventListener('click', () => {
       const memory = getChatMemory();
       const block = getBlockById(memory, runtime.selectedBlockId);
@@ -2113,6 +2222,10 @@ async function onChatChanged() {
   runtime.libraryTab = 'active';
   closeRegeneration();
   runtime.manualRollupIds.clear();
+  for (const id of ['smp-range-from', 'smp-range-to', 'smp-checkpoint-at']) {
+    const field = document.getElementById(id);
+    if (field) field.value = '';
+  }
   closeBlockEditor();
   await reconcileChatMemory(getChatMemory());
   renderLibrary();
@@ -2328,6 +2441,8 @@ async function validateAfterChatMutation(label) {
   const memory = getChatMemory();
   const sourceChanged = !activeMemoryIsValid(getCurrentComparableChat(), memory);
   await reconcileChatMemory(memory, msg`${label}; active memory marked stale.`);
+  const checkpointList = document.getElementById('smp-checkpoint-list');
+  if (checkpointList) checkpointList.textContent = showCheckpoints();
   if (!sourceChanged && getActiveBlocks(memory).length) {
     setStatus('idle', msg`${label}; active memory remains valid.`);
   }
@@ -2341,6 +2456,7 @@ const nativeContext = installNativeContextManagement({
 
 globalThis[INTERCEPTOR_NAME] = runInterceptor;
 getSettings();
+registerMemoryCommands();
 
 eventSource.on(event_types.APP_READY, () => setTimeout(() => void renderSettings(), 0));
 eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
