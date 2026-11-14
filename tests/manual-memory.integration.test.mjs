@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { buildCompactionPlan, createEmptyMemory, deleteMemoryBlock, editMemoryBlock, normalizeMemory, rewriteConversationWithMemory, stageCompactionTransaction, stageManualRollup } from '../lib/core.mjs';
-import { changeCheckpoint, listCheckpoints, prepareManualRange, stageManualCompaction } from '../lib/manual-memory.mjs';
+import { changeCheckpoint, getManualMessageHints, listCheckpoints, prepareManualRange, stageManualCompaction } from '../lib/manual-memory.mjs';
 import { partitionRawEntries } from '../lib/summarizer.mjs';
 
 // Failure matrix: wrong inclusive boundaries or indices after system messages,
@@ -24,6 +24,15 @@ const block = (id, from, to, level = 1) => ({
 });
 const memoryWith = (...blocks) => ({ ...createEmptyMemory(), blocks });
 const pairs = blocks => blocks.map(b => [b.sourceFrom, b.sourceTo]);
+
+test('manual hints use Tavern numbers, skip covered and hidden starts, and end on the latest available message', () => {
+  const memory = memoryWith(block('first', 0, 1), block('last', 8, 9));
+  const visible = chat.map(m => m.index === 2 || m.index === 9 ? { ...m, extra: { [Symbol.for('ignore')]: true } } : m);
+  assert.deepEqual(getManualMessageHints(memory, visible), { from: '4', to: '9', at: '9' });
+  assert.deepEqual(getManualMessageHints(memoryWith(), chat), { from: '0', to: '10', at: '10' });
+  assert.deepEqual(getManualMessageHints(memoryWith(block('all', 0, 9)), chat), { from: '', to: '10', at: '10' });
+  assert.deepEqual(getManualMessageHints(memory, []), { from: '', to: '', at: '' });
+});
 const partition = entries => partitionRawEntries(entries, 520, text => text.length);
 function fixture() {
   const calls = [], saves = [];

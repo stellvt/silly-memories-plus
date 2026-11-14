@@ -56,7 +56,7 @@ import {
   SUMMARY_JSON_SCHEMA,
   sumTokens,
 } from './lib/core.mjs';
-import { changeCheckpoint, listCheckpoints, prepareManualRange, stageManualCompaction } from './lib/manual-memory.mjs';
+import { changeCheckpoint, getManualMessageHints, listCheckpoints, prepareManualRange, stageManualCompaction } from './lib/manual-memory.mjs';
 import {
   assertSummaryRequestFits,
   chunkStructuredSources,
@@ -1777,6 +1777,15 @@ function updateStats(memory = getChatMemory()) {
   stats.textContent = t`Active blocks: ${active.length} (${activeTokens}t) · Using original history: ${exposedRaw}`;
 }
 
+function updateManualMessageHints(memory = getChatMemory()) {
+  const start = document.getElementById('smp-range-from');
+  if (!start) return;
+  const { from, to, at } = getManualMessageHints(memory, getCurrentComparableChat());
+  start.placeholder = from;
+  document.getElementById('smp-range-to').placeholder = to;
+  document.getElementById('smp-checkpoint-at').placeholder = at;
+}
+
 function renderLibrary() {
   const container = document.getElementById('smp-library');
   if (!container) return;
@@ -1786,6 +1795,7 @@ function renderLibrary() {
   const drafts = sameChat ? [...container.querySelectorAll('.smp-inline-editor:not([hidden]) [data-field]')].map(input => ({ field: input.dataset.field, value: input.value })) : [];
   runtime.libraryChatId = getCurrentChatId();
   const memory = getChatMemory();
+  updateManualMessageHints(memory);
   const checkpointList = document.getElementById('smp-checkpoint-list');
   if (checkpointList) checkpointList.textContent = showCheckpoints(memory);
   syncPinnedFactsEditor();
@@ -2436,11 +2446,15 @@ function clearCurrentOverheadEstimate() {
 }
 
 async function validateAfterChatMutation(label) {
-  if (!getSettings().enabled) return;
+  if (!getSettings().enabled) {
+    updateManualMessageHints();
+    return;
+  }
   clearCurrentOverheadEstimate();
   const memory = getChatMemory();
   const sourceChanged = !activeMemoryIsValid(getCurrentComparableChat(), memory);
   await reconcileChatMemory(memory, msg`${label}; active memory marked stale.`);
+  updateManualMessageHints();
   const checkpointList = document.getElementById('smp-checkpoint-list');
   if (checkpointList) checkpointList.textContent = showCheckpoints();
   if (!sourceChanged && getActiveBlocks(memory).length) {
@@ -2492,7 +2506,11 @@ eventSource.on(event_types.MESSAGE_EDITED, () => void validateAfterChatMutation(
 eventSource.on(event_types.MESSAGE_UPDATED, () => void validateAfterChatMutation(msg('Message updated')));
 eventSource.on(event_types.MESSAGE_SWIPED, () => void validateAfterChatMutation(msg('Swipe changed')));
 eventSource.on(event_types.MESSAGE_DELETED, () => void validateAfterChatMutation(msg('Message deleted')));
-eventSource.on(event_types.MESSAGE_SENT, clearCurrentOverheadEstimate);
-eventSource.on(event_types.MESSAGE_RECEIVED, clearCurrentOverheadEstimate);
+for (const event of [event_types.MESSAGE_SENT, event_types.MESSAGE_RECEIVED]) {
+  eventSource.on(event, () => {
+    clearCurrentOverheadEstimate();
+    updateManualMessageHints();
+  });
+}
 
 if (document.readyState !== 'loading') setTimeout(() => void renderSettings(), 0);

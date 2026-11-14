@@ -69,6 +69,29 @@ try {
     assert.deepEqual((await snapshot()).active, [[1, 2, 1], [3, 4, 1]]);
     assert.equal(await page.locator('#smp-library .smp-block').count(), 2);
   });
+  await check('message hints refresh without filling or overwriting the fields', async () => {
+    const from = page.locator('#smp-range-from');
+    const to = page.locator('#smp-range-to');
+    const at = page.locator('#smp-checkpoint-at');
+    assert.deepEqual(await Promise.all([from, to, at].map(field => field.getAttribute('placeholder'))), ['0', '5', '5']);
+    assert.equal(await to.inputValue(), '');
+    await page.evaluate(async () => {
+      document.getElementById('smp-range-to').value = '4';
+      smoke.c.chat.push({ name: 'Mira', mes: 'Latest reply', extra: {} });
+      const { eventSource, event_types } = await import('/script.js');
+      await eventSource.emit(event_types.MESSAGE_RECEIVED, 6);
+    });
+    assert.equal(await to.getAttribute('placeholder'), '6');
+    assert.equal(await at.getAttribute('placeholder'), '6');
+    assert.equal(await to.inputValue(), '4');
+    await page.evaluate(async () => {
+      smoke.c.chat.pop();
+      document.getElementById('smp-range-to').value = '';
+      const { eventSource, event_types } = await import('/script.js');
+      await eventSource.emit(event_types.MESSAGE_DELETED, 6);
+    });
+    await page.waitForFunction(() => document.getElementById('smp-checkpoint-at').placeholder === '5');
+  });
   await check('overlap popup can cancel, then range button can confirm', async () => {
     const rejected = run('/smp-compact from=0 to=1');
     await page.waitForFunction(() => smoke.Popup.util.popups.some(popup => popup.dlg.open && popup.dlg.textContent.includes('Replace overlapping memory')));
