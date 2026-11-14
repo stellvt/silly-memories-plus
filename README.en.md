@@ -21,7 +21,7 @@ Opening a chat checks each memory block's source. An archived block can be resto
 5. Click **Test summarizer** to check the connection with a short sample.
 6. Open a chat. Automatic compaction is enabled by default; you can start with the default settings.
 
-Click **Summarize history** under **Runtime and maintenance** to create L1 blocks from older messages and keep the recent tail. To combine existing blocks, select them in **Current chat memory** and click **Merge blocks**. Task progress appears above the submenus, next to **Stop task**.
+Click **Summarize older messages** under **Runtime and maintenance** to create L1 blocks from older messages and keep the recent tail. To combine existing blocks, select them in **Current chat memory** and click **Merge blocks**. Task progress appears above the submenus, next to **Stop task**.
 
 **Summarize range** uses the message numbers shown in SillyTavern, includes both endpoints, and can include recent messages. If the range overlaps active blocks, review the affected blocks before confirming. Each affected block moves to the archive once its replacement is saved. Messages outside the new coverage are sent in full.
 

@@ -125,17 +125,19 @@
         <div class="smp-submenu-content">
           <div id="smp-stats" class="smp-stats">Active blocks: 0</div>
 
-          <section class="smp-tool-card" aria-labelledby="smp-manual-compaction-heading">
+          <section class="smp-tool-card smp-tool-card-inline" aria-labelledby="smp-manual-compaction-heading">
             <b id="smp-manual-compaction-heading" data-smp-i18n="Manual compaction">Manual compaction</b>
             <div class="smp-actions">
               <button id="smp-compact-now" class="menu_button" type="button">
-                <i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize history">Summarize history</span>
+                <i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize older messages">Summarize older messages</span>
               </button>
             </div>
-            <div class="smp-card-divider" aria-hidden="true"></div>
-            <div class="smp-grid">
-              <label><span data-smp-i18n="From message">From message</span><input id="smp-range-from" class="text_pole" type="number" min="0" step="1"></label>
-              <label><span data-smp-i18n="Through message">Through message</span><input id="smp-range-to" class="text_pole" type="number" min="0" step="1"></label>
+          </section>
+          <section class="smp-tool-card" aria-labelledby="smp-range-heading">
+            <b id="smp-range-heading" data-smp-i18n="Message range">Message range</b>
+            <div class="smp-grid smp-range-grid">
+              <label><span data-smp-i18n="From">From</span><input id="smp-range-from" class="text_pole" type="number" min="0" step="1"></label>
+              <label><span data-smp-i18n="Through">Through</span><input id="smp-range-to" class="text_pole" type="number" min="0" step="1"></label>
             </div>
             <div class="smp-actions">
               <button id="smp-compact-range" class="menu_button" type="button"><i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize range">Summarize range</span></button>

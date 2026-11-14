@@ -109,8 +109,16 @@
   min-width: 0;
 }
 
-#smp-settings .smp-card-divider {
-  border-top: 1px solid var(--SmartThemeBorderColor);
+#smp-settings .smp-tool-card-inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+#smp-settings .smp-tool-card-inline > b {
+  flex: 1 1 190px;
 }
 
 #smp-settings #smp-checkpoint-list {
@@ -371,7 +379,7 @@
 }
 
 @media (max-width: 700px) {
-  #smp-settings .smp-grid {
+  #smp-settings .smp-grid:not(.smp-range-grid) {
     grid-template-columns: minmax(0, 1fr);
   }
 }
