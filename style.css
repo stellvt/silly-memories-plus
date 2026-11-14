@@ -55,6 +55,7 @@
 }
 
 #smp-settings .smp-grid > label,
+#smp-settings .smp-tool-card > label,
 #smp-settings .smp-prompt-field,
 #smp-settings .smp-inline-editor label,
 #smp-settings .smp-editor-fields {
@@ -87,11 +88,35 @@
 #smp-settings .smp-status,
 #smp-settings .smp-stats,
 #smp-settings .smp-block-actions,
+#smp-settings .smp-tool-card,
 #smp-settings .smp-rollup-panel {
   padding: 8px 10px;
   border: 1px solid var(--SmartThemeBorderColor);
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.14);
+}
+
+#smp-settings .smp-tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+#smp-settings .smp-tool-card input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+#smp-settings .smp-card-divider {
+  border-top: 1px solid var(--SmartThemeBorderColor);
+}
+
+#smp-settings #smp-checkpoint-list {
+  font-size: 0.85em;
+  opacity: 0.72;
+  overflow-wrap: anywhere;
 }
 
 #smp-settings .smp-status[data-kind="success"] {

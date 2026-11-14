@@ -62,6 +62,32 @@ try {
     await fn();
     results.push({ name, passed: true });
   }
+  await check('manual controls use compact cards matching the merge panel at 320px', async () => {
+    const layout = await page.evaluate(() => {
+      const root = document.getElementById('smp-settings');
+      root.style.width = '320px';
+      root.querySelector('[data-section="runtime"]').open = true;
+      const history = document.getElementById('smp-compact-now').closest('.smp-tool-card');
+      const range = document.getElementById('smp-compact-range').closest('.smp-tool-card');
+      const arc = document.getElementById('smp-checkpoint-at').closest('.smp-tool-card');
+      if (!history || !arc) return {};
+      const shell = element => {
+        const style = getComputedStyle(element);
+        return [style.borderRadius, style.borderTop, style.backgroundColor, style.padding];
+      };
+      const merge = root.querySelector('.smp-rollup-panel');
+      return { grouped: history === range && history !== arc && !history.contains(document.getElementById('smp-refresh')),
+        matching: JSON.stringify(shell(history)) === JSON.stringify(shell(merge)) && JSON.stringify(shell(arc)) === JSON.stringify(shell(merge)),
+        fits: [history, arc, ...root.querySelectorAll('.smp-tool-card .smp-grid')].every(element => element.scrollWidth <= element.clientWidth + 1) };
+    });
+    assert.deepEqual(layout, { grouped: true, matching: true, fits: true });
+    await page.locator('[data-section="runtime"]').screenshot({ path: resolve(directory, 'manual-controls-320px.png') });
+    await page.evaluate(() => {
+      const root = document.getElementById('smp-settings');
+      root.style.width = '390px';
+      root.querySelector('[data-section="memory"]').open = true;
+    });
+  });
   await check('checkpoint command splits inclusive range and updates cards', async () => {
     await run('/smp-checkpoint at=2');
     assert.match((await run('/smp-checkpoints')).pipe, /2/);

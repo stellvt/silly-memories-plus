@@ -125,10 +125,35 @@
         <div class="smp-submenu-content">
           <div id="smp-stats" class="smp-stats">Active blocks: 0</div>
 
+          <section class="smp-tool-card" aria-labelledby="smp-manual-compaction-heading">
+            <b id="smp-manual-compaction-heading" data-smp-i18n="Manual compaction">Manual compaction</b>
+            <div class="smp-actions">
+              <button id="smp-compact-now" class="menu_button" type="button">
+                <i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize history">Summarize history</span>
+              </button>
+            </div>
+            <div class="smp-card-divider" aria-hidden="true"></div>
+            <div class="smp-grid">
+              <label><span data-smp-i18n="From message">From message</span><input id="smp-range-from" class="text_pole" type="number" min="0" step="1"></label>
+              <label><span data-smp-i18n="Through message">Through message</span><input id="smp-range-to" class="text_pole" type="number" min="0" step="1"></label>
+            </div>
+            <div class="smp-actions">
+              <button id="smp-compact-range" class="menu_button" type="button"><i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize range">Summarize range</span></button>
+            </div>
+          </section>
+          <section class="smp-tool-card" aria-labelledby="smp-arc-heading">
+            <b id="smp-arc-heading" data-smp-i18n="Arc checkpoints">Arc checkpoints</b>
+            <label>
+              <span data-smp-i18n="Arc end message">Arc end message</span>
+              <input id="smp-checkpoint-at" class="text_pole" type="number" min="0" step="1">
+            </label>
+            <div class="smp-actions">
+              <button id="smp-add-checkpoint" class="menu_button" type="button"><i class="fa-solid fa-flag"></i><span data-smp-i18n="Mark arc end">Mark arc end</span></button>
+              <button id="smp-remove-checkpoint" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span data-smp-i18n="Remove arc end">Remove arc end</span></button>
+            </div>
+            <div id="smp-checkpoint-list" aria-live="polite"></div>
+          </section>
           <div class="smp-actions">
-            <button id="smp-compact-now" class="menu_button" type="button">
-              <i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize history">Summarize history</span>
-            </button>
             <button id="smp-refresh" class="menu_button" type="button">
               <i class="fa-solid fa-rotate"></i><span data-smp-i18n="Refresh">Refresh</span>
             </button>
@@ -138,24 +163,6 @@
             <button id="smp-clear" class="menu_button redWarningBG" type="button">
               <i class="fa-solid fa-trash"></i><span data-smp-i18n="Clear chat memory">Clear chat memory</span>
             </button>
-          </div>
-          <div class="smp-submenu-content">
-            <div class="smp-grid">
-              <label><span data-smp-i18n="From message">From message</span><input id="smp-range-from" class="text_pole" type="number" min="0" step="1"></label>
-              <label><span data-smp-i18n="Through message">Through message</span><input id="smp-range-to" class="text_pole" type="number" min="0" step="1"></label>
-            </div>
-            <div class="smp-actions">
-              <button id="smp-compact-range" class="menu_button" type="button"><i class="fa-solid fa-compress"></i><span data-smp-i18n="Summarize range">Summarize range</span></button>
-            </div>
-          </div>
-          <div class="smp-submenu-content">
-            <label for="smp-checkpoint-at" data-smp-i18n="Arc end message">Arc end message</label>
-            <input id="smp-checkpoint-at" class="text_pole" type="number" min="0" step="1">
-            <div class="smp-actions">
-              <button id="smp-add-checkpoint" class="menu_button" type="button"><i class="fa-solid fa-flag"></i><span data-smp-i18n="Mark arc end">Mark arc end</span></button>
-              <button id="smp-remove-checkpoint" class="menu_button" type="button"><i class="fa-solid fa-xmark"></i><span data-smp-i18n="Remove arc end">Remove arc end</span></button>
-            </div>
-            <div id="smp-checkpoint-list" aria-live="polite"></div>
           </div>
         </div>
       </details>

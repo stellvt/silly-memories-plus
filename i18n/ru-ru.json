@@ -37,6 +37,8 @@
   "smp.Interface language": "Язык интерфейса",
   "smp.SillyTavern language": "Язык SillyTavern",
   "smp.Summarize history": "Сжать историю",
+  "smp.Manual compaction": "Ручное сжатие",
+  "smp.Arc checkpoints": "Отметки арок",
   "smp.From message": "С сообщения",
   "smp.Through message": "По сообщение",
   "smp.Summarize range": "Сжать диапазон",
